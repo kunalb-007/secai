@@ -2,6 +2,22 @@ version: '3.9'
 
 services:
 
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: secai-postgres
+
+    environment:
+      POSTGRES_DB: secai
+      POSTGRES_USER: secai
+      POSTGRES_PASSWORD: secai_password
+
+    ports:
+      - "5433:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+
   minio:
     image: minio/minio:latest
     container_name: secai-minio
@@ -39,5 +55,6 @@ services:
       start_period: 120s
 
 volumes:
+  postgres_data:
   minio_data:
   marker_models:    # persists downloaded Marker model weights

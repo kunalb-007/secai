@@ -1,9 +1,11 @@
-// src/components/AppLayout.jsx  — REPLACE ENTIRE FILE
+// src/components/AppLayout.jsx  — REPLACE ENTIRE FILE (Phase 5 update)
+// Adds "Review Answers" in the Questionnaires section when on a review page.
 import { Layout, Menu, Button, Typography } from 'antd';
 import {
     SafetyCertificateOutlined, FileTextOutlined,
     UploadOutlined, LogoutOutlined,
     FileExcelOutlined, PlusOutlined,
+    EyeOutlined,
 } from '@ant-design/icons';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
@@ -19,12 +21,17 @@ export default function AppLayout({ children }) {
     const handleLogout = () => { logout(); navigate('/login'); };
 
     const selectedKey = (() => {
-        if (location.pathname === '/questionnaires/upload') return 'q-upload';
-        if (location.pathname.startsWith('/questionnaires')) return 'questionnaires';
-        if (location.pathname === '/documents/upload')      return 'doc-upload';
-        if (location.pathname.startsWith('/documents'))     return 'documents';
+        if (location.pathname === '/questionnaires/upload')            return 'q-upload';
+        if (location.pathname.endsWith('/review'))                     return 'q-review';
+        if (location.pathname.startsWith('/questionnaires'))           return 'questionnaires';
+        if (location.pathname === '/documents/upload')                 return 'doc-upload';
+        if (location.pathname.startsWith('/documents'))                return 'documents';
         return 'dashboard';
     })();
+
+    // Extract questionnaire ID from /questionnaires/:id/review for the review link
+    const reviewMatch = location.pathname.match(/\/questionnaires\/([^/]+)\/review/);
+    const reviewId    = reviewMatch?.[1] ?? null;
 
     return (
         <Layout style={{ minHeight: '100vh' }}>
@@ -52,7 +59,11 @@ export default function AppLayout({ children }) {
                         {
                             key: 'documents-group',
                             type: 'group',
-                            label: <Text style={{ color: 'rgba(255,255,255,0.45)', fontSize: 11 }}>DOCUMENTS</Text>,
+                            label: (
+                                <Text style={{ color: 'rgba(255,255,255,0.45)', fontSize: 11 }}>
+                                    DOCUMENTS
+                                </Text>
+                            ),
                             children: [
                                 {
                                     key: 'documents',
@@ -73,7 +84,11 @@ export default function AppLayout({ children }) {
                         {
                             key: 'questionnaires-group',
                             type: 'group',
-                            label: <Text style={{ color: 'rgba(255,255,255,0.45)', fontSize: 11 }}>QUESTIONNAIRES</Text>,
+                            label: (
+                                <Text style={{ color: 'rgba(255,255,255,0.45)', fontSize: 11 }}>
+                                    QUESTIONNAIRES
+                                </Text>
+                            ),
                             children: [
                                 {
                                     key: 'questionnaires',
@@ -85,6 +100,16 @@ export default function AppLayout({ children }) {
                                     icon: <PlusOutlined />,
                                     label: <Link to="/questionnaires/upload">Upload Questionnaire</Link>,
                                 },
+                                // Only show "Review Answers" when actively on a review page
+                                ...(reviewId ? [{
+                                    key: 'q-review',
+                                    icon: <EyeOutlined />,
+                                    label: (
+                                        <Link to={`/questionnaires/${reviewId}/review`}>
+                                            Review Answers
+                                        </Link>
+                                    ),
+                                }] : []),
                             ],
                         },
                     ]}

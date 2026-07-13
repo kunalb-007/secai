@@ -24,13 +24,24 @@ class DocumentProcessingServiceTest {
     @Mock DocumentChunkRepository chunkRepo;
     @Mock
     StorageService storageService;
+
     @Mock
     TextExtractorFactory extractorFactory;
+
     @Mock
     TextExtractor extractor;
+
+    @Mock
+    TextCleaner textCleaner;
+
+    @Mock
+    TextChunker textChunker;
+
     @Mock
     EmbeddingService embeddingService;
-    @InjectMocks DocumentProcessingService processingService;
+
+    @InjectMocks
+    DocumentProcessingService processingService;
 
     @Test
     void process_happyPath_savesChunksAndSetsReady() throws Exception {
@@ -56,6 +67,28 @@ class DocumentProcessingServiceTest {
         when(extractorFactory.forContentType(any(), any())).thenReturn(extractor);
         when(extractor.extract(any())).thenReturn(sampleText);
         when(storageService.uploadText(any(), any(), any())).thenReturn("some/path");
+
+        when(textCleaner.clean(sampleText))
+                .thenReturn(sampleText);
+
+        List<TextChunker.Chunk> chunks = List.of(
+                new TextChunker.Chunk(
+                        "Access Control",
+                        "MFA is required for all users.",
+                        0,
+                        8
+                ),
+                new TextChunker.Chunk(
+                        "Encryption",
+                        "Data is encrypted using AES-256.",
+                        1,
+                        9
+                )
+        );
+
+        when(textChunker.chunk(sampleText))
+                .thenReturn(chunks);
+
         when(embeddingService.embedAll(any())).thenAnswer(inv -> {
             List<String> texts = inv.getArgument(0);
             return texts.stream().map(t -> new float[1536]).toList();
@@ -71,7 +104,7 @@ class DocumentProcessingServiceTest {
 
         // Verify document was saved with READY status
         ArgumentCaptor<Document> savedDoc = ArgumentCaptor.forClass(Document.class);
-        verify(documentRepo, times(3)).save(savedDoc.capture()); // PROCESSING, then READY
+        verify(documentRepo, times(2)).save(savedDoc.capture()); // PROCESSING, then READY
 
         List<Document> savedDocs = savedDoc.getAllValues();
         assertThat(savedDocs.getLast().getStatus())

@@ -3,7 +3,7 @@ spring:
     name: secai-backend
 
   datasource:
-    url: ${DB_URL:jdbc:postgresql://localhost:5432/secai}
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/secai}
     username: ${DB_USERNAME:secai}
     password: ${DB_PASSWORD:secai_password}
     driver-class-name: org.postgresql.Driver

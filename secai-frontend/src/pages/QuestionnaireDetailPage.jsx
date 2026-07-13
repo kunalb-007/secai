@@ -1,17 +1,22 @@
-// src/pages/QuestionnaireDetailPage.jsx
+// src/pages/QuestionnaireDetailPage.jsx  — REPLACE ENTIRE FILE (Phase 5)
 import { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
     Table, Tag, Button, Typography, Alert, Spin,
     Card, Statistic, Row, Col, Select, Space,
-    Tooltip, Badge, Popconfirm,
+    Tooltip, Badge, Popconfirm, Progress,
 } from 'antd';
 import {
     ArrowLeftOutlined, WarningOutlined,
     QuestionCircleOutlined, ReloadOutlined,
     DeleteOutlined, RobotOutlined,
+    ThunderboltOutlined, EyeOutlined,
 } from '@ant-design/icons';
-import { getQuestionnaire, getQuestions, deleteQuestionnaire } from '../api/questionnaires';
+import {
+    getQuestionnaire, getQuestions,
+    deleteQuestionnaire, startGeneration,
+} from '../api/questionnaires';
+import { useGenerationPoller } from '../hooks/useGenerationPoller';
 import AppLayout from '../components/AppLayout';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
@@ -22,40 +27,55 @@ const { Title, Text } = Typography;
 const { Option } = Select;
 
 const STATUS_COLOR = {
-    PENDING:   'default',
-    GENERATED: 'processing',
-    APPROVED:  'success',
-    EDITED:    'cyan',
-    REJECTED:  'error',
+    PENDING:    'default',
+    GENERATED:  'processing',
+    APPROVED:   'success',
+    EDITED:     'cyan',
+    REJECTED:   'error',
 };
 
 const Q_STATUS_COLOR = {
-    PARSED:      'blue',
-    GENERATING:  'processing',
-    COMPLETED:   'success',
-    FAILED:      'error',
-    UPLOADED:    'default',
+    PARSED:     'blue',
+    GENERATING: 'processing',
+    COMPLETED:  'success',
+    FAILED:     'error',
+    UPLOADED:   'default',
 };
 
 export default function QuestionnaireDetailPage() {
     const { id } = useParams();
     const navigate = useNavigate();
 
-    const [detail, setDetail]         = useState(null);
-    const [questions, setQuestions]   = useState([]);
-    const [totalQ, setTotalQ]         = useState(0);
-    const [currentPage, setCurrentPage] = useState(0);
-    const [pageSize]                  = useState(50);
+    const [detail, setDetail]             = useState(null);
+    const [questions, setQuestions]       = useState([]);
+    const [totalQ, setTotalQ]             = useState(0);
+    const [currentPage, setCurrentPage]   = useState(0);
+    const [pageSize]                      = useState(50);
     const [statusFilter, setStatusFilter] = useState('');
     const [loadingDetail, setLoadingDetail] = useState(true);
-    const [loadingQ, setLoadingQ]     = useState(false);
-    const [pageError, setPageError]   = useState('');
+    const [loadingQ, setLoadingQ]         = useState(false);
+    const [pageError, setPageError]       = useState('');
+    const [generating, setGenerating]     = useState(false);
+    const [genError, setGenError]         = useState('');
+    const [pollId, setPollId]             = useState(null);
 
-    // ── Fetch questionnaire detail ───────────────────────────────────────
+    // Poll when generation is running
+    const onGenerationComplete = useCallback(() => {
+        setPollId(null);
+        setGenerating(false);
+        fetchDetail();
+    }, []); // eslint-disable-line
+
+    const { job: liveJob } = useGenerationPoller(pollId, onGenerationComplete);
+
     const fetchDetail = useCallback(async () => {
         try {
             const res = await getQuestionnaire(id);
             setDetail(res.data);
+            if (res.data?.aiJob?.status === 'RUNNING') {
+                setGenerating(true);
+                setPollId(id);
+            }
         } catch {
             setPageError('Questionnaire not found or you do not have access.');
         } finally {
@@ -63,7 +83,6 @@ export default function QuestionnaireDetailPage() {
         }
     }, [id]);
 
-    // ── Fetch questions (paginated) ──────────────────────────────────────
     const fetchQuestions = useCallback(async (page = 0, status = '') => {
         setLoadingQ(true);
         try {
@@ -77,17 +96,22 @@ export default function QuestionnaireDetailPage() {
         }
     }, [id, pageSize]);
 
-    useEffect(() => {
-        fetchDetail();
-        fetchQuestions(0, '');
-    }, [fetchDetail, fetchQuestions]);
+    useEffect(() => { fetchDetail(); fetchQuestions(0, ''); }, [fetchDetail, fetchQuestions]);
+    useEffect(() => { fetchQuestions(currentPage, statusFilter); }, [currentPage, statusFilter]); // eslint-disable-line
 
-    // Refetch when filter or page changes
-    useEffect(() => {
-        fetchQuestions(currentPage, statusFilter);
-    }, [currentPage, statusFilter, fetchQuestions]);
+    const handleGenerate = async () => {
+        setGenError('');
+        setGenerating(true);
+        try {
+            await startGeneration(id);
+            setPollId(id);
+            fetchDetail();
+        } catch (err) {
+            setGenerating(false);
+            setGenError(err.response?.data?.error || 'Failed to start generation.');
+        }
+    };
 
-    // ── Delete ───────────────────────────────────────────────────────────
     const handleDelete = async () => {
         try {
             await deleteQuestionnaire(id);
@@ -97,7 +121,18 @@ export default function QuestionnaireDetailPage() {
         }
     };
 
-    // ── Table columns ────────────────────────────────────────────────────
+    const activeJob    = liveJob || detail?.aiJob;
+    const isRunning    = generating || activeJob?.status === 'RUNNING';
+    const isCompleted  = activeJob?.status === 'COMPLETED';
+    const canGenerate  = !isRunning && (activeJob?.status === 'PENDING' || activeJob?.status === 'FAILED' || !activeJob);
+
+    const statusCounts   = detail?.statusCounts || {};
+    const pendingCount   = statusCounts.PENDING   || 0;
+    const generatedCount = statusCounts.GENERATED || 0;
+    const approvedCount  = statusCounts.APPROVED  || 0;
+    const editedCount    = statusCounts.EDITED    || 0;
+    const rejectedCount  = statusCounts.REJECTED  || 0;
+
     const columns = [
         {
             title: '#',
@@ -105,37 +140,30 @@ export default function QuestionnaireDetailPage() {
             width: 65,
             render: (v) => v
                 ? <Text code style={{ fontSize: 12 }}>{v}</Text>
-                : <Text type="secondary" style={{ fontSize: 12 }}>—</Text>,
+                : <Text type="secondary">—</Text>,
         },
         {
             title: 'Category',
             dataIndex: 'category',
             width: 150,
             ellipsis: true,
-            render: (v) => v
-                ? <Tag style={{ fontSize: 11 }}>{v}</Tag>
-                : null,
+            render: (v) => v ? <Tag style={{ fontSize: 11 }}>{v}</Tag> : null,
         },
         {
             title: 'Question',
             dataIndex: 'questionText',
-            render: (text) => (
-                <Text style={{ fontSize: 13 }}>{text}</Text>
-            ),
+            render: (text) => <Text style={{ fontSize: 13 }}>{text}</Text>,
         },
         {
             title: 'Status',
             dataIndex: 'status',
             width: 105,
             render: (s) => (
-                <Tag color={STATUS_COLOR[s] || 'default'} style={{ fontSize: 11 }}>
-                    {s}
-                </Tag>
+                <Tag color={STATUS_COLOR[s] || 'default'} style={{ fontSize: 11 }}>{s}</Tag>
             ),
         },
     ];
 
-    // ── Loading state ────────────────────────────────────────────────────
     if (loadingDetail) {
         return (
             <AppLayout>
@@ -151,11 +179,8 @@ export default function QuestionnaireDetailPage() {
             <AppLayout>
                 <div style={{ padding: 24 }}>
                     <Alert type="error" message={pageError} showIcon />
-                    <Button
-                        icon={<ArrowLeftOutlined />}
-                        style={{ marginTop: 16 }}
-                        onClick={() => navigate('/questionnaires')}
-                    >
+                    <Button icon={<ArrowLeftOutlined />} style={{ marginTop: 16 }}
+                            onClick={() => navigate('/questionnaires')}>
                         Back to Questionnaires
                     </Button>
                 </div>
@@ -163,32 +188,19 @@ export default function QuestionnaireDetailPage() {
         );
     }
 
-    // ── Stats ─────────────────────────────────────────────────────────────
-    const statusCounts = detail?.statusCounts || {};
-    const pendingCount   = statusCounts.PENDING   || 0;
-    const generatedCount = statusCounts.GENERATED || 0;
-    const approvedCount  = statusCounts.APPROVED  || 0;
-    const editedCount    = statusCounts.EDITED    || 0;
-    const rejectedCount  = statusCounts.REJECTED  || 0;
-
     return (
         <AppLayout>
             <div style={{ padding: 24, maxWidth: 1100 }}>
 
-                {/* Header row */}
+                {/* Header */}
                 <div style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'flex-start',
-                    marginBottom: 20,
+                    display: 'flex', justifyContent: 'space-between',
+                    alignItems: 'flex-start', marginBottom: 20,
                 }}>
                     <div>
-                        <Button
-                            type="text"
-                            icon={<ArrowLeftOutlined />}
-                            onClick={() => navigate('/questionnaires')}
-                            style={{ paddingLeft: 0, marginBottom: 4 }}
-                        >
+                        <Button type="text" icon={<ArrowLeftOutlined />}
+                                onClick={() => navigate('/questionnaires')}
+                                style={{ paddingLeft: 0, marginBottom: 4 }}>
                             All Questionnaires
                         </Button>
                         <Title level={4} style={{ margin: 0 }}>
@@ -196,8 +208,7 @@ export default function QuestionnaireDetailPage() {
                             {detail?.originalFormat && (
                                 <Tag
                                     color={{ XLSX: 'green', CSV: 'blue', DOCX: 'purple' }[detail.originalFormat]}
-                                    style={{ marginLeft: 10, fontSize: 12 }}
-                                >
+                                    style={{ marginLeft: 10, fontSize: 12 }}>
                                     {detail.originalFormat}
                                 </Tag>
                             )}
@@ -208,21 +219,32 @@ export default function QuestionnaireDetailPage() {
                     </div>
 
                     <Space>
-                        <Button
-                            icon={<ReloadOutlined />}
-                            onClick={() => { fetchDetail(); fetchQuestions(currentPage, statusFilter); }}
-                        >
+                        <Button icon={<ReloadOutlined />}
+                                onClick={() => { fetchDetail(); fetchQuestions(currentPage, statusFilter); }}>
                             Refresh
                         </Button>
-                        <Tooltip title="AI answer generation (Phase 5)">
+
+                        {/* Primary action: Generate if not yet done, Review if done */}
+                        {(isCompleted || (generatedCount > 0)) ? (
                             <Button
                                 type="primary"
-                                icon={<RobotOutlined />}
-                                disabled
+                                icon={<EyeOutlined />}
+                                onClick={() => navigate(`/questionnaires/${id}/review`)}
                             >
-                                Generate Answers
+                                Review Answers
                             </Button>
-                        </Tooltip>
+                        ) : (
+                            <Button
+                                type="primary"
+                                icon={<ThunderboltOutlined />}
+                                onClick={handleGenerate}
+                                loading={isRunning}
+                                disabled={!canGenerate}
+                            >
+                                {isRunning ? 'Generating…' : 'Generate Answers'}
+                            </Button>
+                        )}
+
                         <Popconfirm
                             title="Delete this questionnaire?"
                             description="All questions will be permanently deleted."
@@ -236,108 +258,59 @@ export default function QuestionnaireDetailPage() {
                     </Space>
                 </div>
 
-                {/* Error */}
+                {/* Errors */}
                 {pageError && (
-                    <Alert
-                        type="error"
-                        message={pageError}
-                        showIcon
-                        closable
-                        style={{ marginBottom: 16 }}
-                        onClose={() => setPageError('')}
-                    />
+                    <Alert type="error" message={pageError} showIcon closable
+                           style={{ marginBottom: 16 }} onClose={() => setPageError('')} />
+                )}
+                {genError && (
+                    <Alert type="error" message={genError} showIcon closable
+                           style={{ marginBottom: 16 }} onClose={() => setGenError('')} />
                 )}
 
                 {/* Low confidence warning */}
                 {detail?.lowConfidenceFlag && (
-                    <Alert
-                        type="warning"
-                        showIcon
-                        icon={<WarningOutlined />}
-                        message="Low parse confidence"
-                        description={detail.warningMessage}
-                        style={{ marginBottom: 16 }}
-                    />
+                    <Alert type="warning" showIcon icon={<WarningOutlined />}
+                           message="Low parse confidence"
+                           description={detail.warningMessage}
+                           style={{ marginBottom: 16 }} />
                 )}
 
-                {/* Stats strip */}
-                <Row gutter={12} style={{ marginBottom: 20 }}>
-                    <Col span={4}>
-                        <Card size="small">
-                            <Statistic
-                                title="Total"
-                                value={detail?.totalQuestions || 0}
-                                valueStyle={{ fontSize: 22 }}
-                            />
-                        </Card>
-                    </Col>
-                    <Col span={4}>
-                        <Card size="small">
-                            <Statistic
-                                title="Pending"
-                                value={pendingCount}
-                                valueStyle={{ fontSize: 22, color: '#8c8c8c' }}
-                            />
-                        </Card>
-                    </Col>
-                    <Col span={4}>
-                        <Card size="small">
-                            <Statistic
-                                title="AI Generated"
-                                value={generatedCount}
-                                valueStyle={{ fontSize: 22, color: '#1890ff' }}
-                            />
-                        </Card>
-                    </Col>
-                    <Col span={4}>
-                        <Card size="small">
-                            <Statistic
-                                title="Approved"
-                                value={approvedCount}
-                                valueStyle={{ fontSize: 22, color: '#52c41a' }}
-                            />
-                        </Card>
-                    </Col>
-                    <Col span={4}>
-                        <Card size="small">
-                            <Statistic
-                                title="Edited"
-                                value={editedCount}
-                                valueStyle={{ fontSize: 22, color: '#13c2c2' }}
-                            />
-                        </Card>
-                    </Col>
-                    <Col span={4}>
-                        <Card size="small">
-                            <Statistic
-                                title="Rejected"
-                                value={rejectedCount}
-                                valueStyle={{ fontSize: 22, color: '#ff4d4f' }}
-                            />
-                        </Card>
-                    </Col>
-                </Row>
-
-                {/* AI job status (visible once Phase 5 starts generating) */}
-                {detail?.aiJob && detail.aiJob.status !== 'PENDING' && (
-                    <Card size="small" style={{ marginBottom: 16 }}>
-                        <Space>
-                            <Text strong>AI Job:</Text>
-                            <Tag color={
-                                detail.aiJob.status === 'COMPLETED' ? 'success' :
-                                    detail.aiJob.status === 'RUNNING'   ? 'processing' :
-                                        detail.aiJob.status === 'FAILED'    ? 'error' : 'default'
-                            }>
-                                {detail.aiJob.status}
-                            </Tag>
-                            {detail.aiJob.status === 'RUNNING' && (
-                                <Text type="secondary">
-                                    {detail.aiJob.completedQuestions} / {detail.aiJob.totalQuestions} answered
-                                </Text>
-                            )}
-                        </Space>
+                {/* Generation progress */}
+                {isRunning && activeJob && (
+                    <Card style={{ marginBottom: 16, borderColor: '#1890ff' }}
+                          bodyStyle={{ padding: '14px 20px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10 }}>
+                            <RobotOutlined style={{ fontSize: 18, color: '#1890ff' }} />
+                            <Text strong>{activeJob.statusMessage || 'Generating answers…'}</Text>
+                        </div>
+                        <Progress
+                            percent={activeJob.progressPercent || 0}
+                            status="active"
+                            strokeColor={{ from: '#108ee9', to: '#87d068' }}
+                            format={() => `${activeJob.completedQuestions} / ${activeJob.totalQuestions}`}
+                        />
                     </Card>
                 )}
+
+                {/* Stats */}
+                <Row gutter={12} style={{ marginBottom: 20 }}>
+                    {[
+                        { title: 'Total',      value: detail?.totalQuestions || 0, color: undefined },
+                        { title: 'Pending',    value: pendingCount,   color: '#8c8c8c' },
+                        { title: 'Generated',  value: generatedCount, color: '#1890ff' },
+                        { title: 'Approved',   value: approvedCount,  color: '#52c41a' },
+                        { title: 'Edited',     value: editedCount,    color: '#13c2c2' },
+                        { title: 'Rejected',   value: rejectedCount,  color: '#ff4d4f' },
+                    ].map(({ title, value, color }) => (
+                        <Col span={4} key={title}>
+                            <Card size="small">
+                                <Statistic title={title} value={value}
+                                           valueStyle={{ fontSize: 20, color }} />
+                            </Card>
+                        </Col>
+                    ))}
+                </Row>
 
                 {/* Questions table */}
                 <Card
@@ -345,14 +318,14 @@ export default function QuestionnaireDetailPage() {
                         <Space>
                             <QuestionCircleOutlined />
                             <span>Questions</span>
-                            <Badge count={totalQ} showZero style={{ backgroundColor: '#1890ff' }} overflowCount={9999} />
+                            <Badge count={totalQ} showZero
+                                   style={{ backgroundColor: '#1890ff' }} overflowCount={9999} />
                         </Space>
                     }
                     extra={
                         <Select
                             value={statusFilter || 'ALL'}
-                            style={{ width: 140 }}
-                            size="small"
+                            style={{ width: 140 }} size="small"
                             onChange={(val) => {
                                 setStatusFilter(val === 'ALL' ? '' : val);
                                 setCurrentPage(0);
@@ -374,24 +347,12 @@ export default function QuestionnaireDetailPage() {
                         loading={loadingQ}
                         size="small"
                         pagination={{
-                            current:   currentPage + 1,  // Ant Design is 1-indexed, Spring is 0-indexed
-                            pageSize:  pageSize,
-                            total:     totalQ,
+                            current:         currentPage + 1,
+                            pageSize:        pageSize,
+                            total:           totalQ,
                             showSizeChanger: false,
-                            showTotal: (total) => `${total} questions`,
-                            onChange: (antPage) => setCurrentPage(antPage - 1),
-                        }}
-                        locale={{
-                            emptyText: (
-                                <div style={{ padding: 32, textAlign: 'center' }}>
-                                    <QuestionCircleOutlined style={{ fontSize: 32, color: '#d9d9d9' }} />
-                                    <p style={{ color: '#8c8c8c', marginTop: 8 }}>
-                                        {statusFilter
-                                            ? `No questions with status "${statusFilter}"`
-                                            : 'No questions found'}
-                                    </p>
-                                </div>
-                            ),
+                            showTotal:       (total) => `${total} questions`,
+                            onChange:        (antPage) => setCurrentPage(antPage - 1),
                         }}
                     />
                 </Card>

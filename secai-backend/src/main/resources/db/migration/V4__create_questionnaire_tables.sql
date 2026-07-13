@@ -6,7 +6,7 @@ CREATE TABLE questionnaire (
                                original_format     VARCHAR(20) NOT NULL,          -- XLSX, CSV, DOCX
                                status              VARCHAR(50) NOT NULL DEFAULT 'UPLOADED',
                                total_questions     INT         NOT NULL DEFAULT 0,
-                               parse_confidence    DECIMAL(4,3),                  -- 0.000 to 1.000
+                               parse_confidence    DOUBLE PRECISION,                  -- 0.000 to 1.000
                                low_confidence_flag BOOLEAN     NOT NULL DEFAULT FALSE,
                                uploaded_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -23,7 +23,7 @@ CREATE TABLE question (
                           category            VARCHAR(255),                  -- sheet name or section header
                           ai_answer           TEXT,
                           evidence            VARCHAR(500),
-                          retrieval_score     DECIMAL(5,4),
+                          retrieval_score     DOUBLE PRECISION,
                           status              VARCHAR(50) NOT NULL DEFAULT 'PENDING',
                           manual_answer       TEXT,
                           sort_order          INT         NOT NULL DEFAULT 0, -- preserves original row order

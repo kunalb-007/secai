@@ -75,18 +75,26 @@ public class TextChunker {
     private List<Section> splitIntoSections(String text) {
         List<Section>  sections       = new ArrayList<>();
         String[]       lines          = text.split("\n");
-        String         currentTitle   = "Introduction";
-        StringBuilder  currentBody    = new StringBuilder();
+        String currentTitle = null;
+        StringBuilder currentBody = new StringBuilder();
+        boolean headingFound = false;
 
         for (String line : lines) {
             var matcher = HEADING.matcher(line.trim());
             if (matcher.matches()) {
-                // Flush current section before starting a new one
+
+                headingFound = true;
+
                 if (!currentBody.toString().isBlank()) {
-                    sections.add(new Section(currentTitle, currentBody.toString().strip()));
+
+                    sections.add(new Section(
+                            currentTitle == null ? "Document" : currentTitle,
+                            currentBody.toString().strip()
+                    ));
                 }
+
                 currentTitle = matcher.group(2).trim();
-                currentBody  = new StringBuilder();
+                currentBody = new StringBuilder();
             } else {
                 currentBody.append(line).append("\n");
             }
@@ -94,13 +102,19 @@ public class TextChunker {
 
         // Flush last section
         if (!currentBody.toString().isBlank()) {
-            sections.add(new Section(currentTitle, currentBody.toString().strip()));
+
+            sections.add(new Section(
+                    headingFound
+                            ? currentTitle
+                            : "Document",
+                    currentBody.toString().strip()
+            ));
         }
 
-        // If no sections found (no headings), treat whole document as one section
-        if (sections.isEmpty() && !text.isBlank()) {
-            sections.add(new Section("Document", text.strip()));
-        }
+//        // If no sections found (no headings), treat whole document as one section
+//        if (sections.isEmpty() && !text.isBlank()) {
+//            sections.add(new Section("Document", text.strip()));
+//        }
 
         return sections;
     }
@@ -124,12 +138,37 @@ public class TextChunker {
         // Split into paragraphs
         String[] paragraphs = body.split("\n\n+");
         StringBuilder current = new StringBuilder();
-        List<String>  overlapBuffer = new ArrayList<>();
         int idx = startIndex;
 
         for (String paragraph : paragraphs) {
             int currentTokens    = estimateTokens(current.toString());
             int paragraphTokens  = estimateTokens(paragraph);
+
+            if (paragraphTokens > maxTokens) {
+
+                if (!current.toString().isBlank()) {
+
+                    String chunkText = current.toString().strip();
+
+                    chunks.add(new Chunk(
+                            section.title(),
+                            chunkText,
+                            idx++,
+                            estimateTokens(chunkText)
+                    ));
+
+                    current = new StringBuilder();
+                }
+
+                idx = splitLargeParagraph(
+                        section.title(),
+                        paragraph,
+                        idx,
+                        chunks
+                );
+
+                continue;
+            }
 
             if (currentTokens + paragraphTokens > maxTokens && currentTokens > 0) {
                 // Flush current chunk
@@ -138,8 +177,17 @@ public class TextChunker {
 
                 // Build overlap for next chunk from tail of current chunk
                 String overlapText = buildOverlap(chunkText, overlapTokens);
-                current = new StringBuilder(overlapText);
-                if (!overlapText.isBlank()) current.append("\n\n");
+                current = new StringBuilder();
+
+                if (!overlapText.isBlank()) {
+                    current.append(overlapText).append("\n\n");
+                }
+
+// If overlap + current paragraph would exceed maxTokens,
+// don't carry overlap into the next chunk.
+                if (estimateTokens(current.toString()) + paragraphTokens > maxTokens) {
+                    current = new StringBuilder();
+                }
             }
 
             current.append(paragraph).append("\n\n");
@@ -187,5 +235,57 @@ public class TextChunker {
     public int estimateTokens(String text) {
         if (text == null || text.isBlank()) return 0;
         return (int) Math.ceil(text.length() / 4.0);
+    }
+
+    private int splitLargeParagraph(
+            String sectionTitle,
+            String paragraph,
+            int startIndex,
+            List<Chunk> chunks
+    ) {
+
+        int maxChars = maxTokens * 4;
+        int overlapChars = overlapTokens * 4;
+
+        int start = 0;
+        int index = startIndex;
+
+        while (start < paragraph.length()) {
+
+            int end = Math.min(start + maxChars, paragraph.length());
+
+// Prefer ending at a word boundary instead of splitting a word
+            int adjustedEnd = end;
+
+            while (adjustedEnd > start
+                    && adjustedEnd < paragraph.length()
+                    && !Character.isWhitespace(paragraph.charAt(adjustedEnd - 1))) {
+
+                adjustedEnd--;
+            }
+
+// Fallback if no whitespace was found
+            if (adjustedEnd <= start) {
+                adjustedEnd = end;
+            }
+
+            String text = paragraph.substring(start, adjustedEnd);
+
+            chunks.add(new Chunk(
+                    sectionTitle,
+                    text,
+                    index++,
+                    estimateTokens(text)
+            ));
+
+            if (adjustedEnd >= paragraph.length()) {
+                break;
+            }
+
+// Start next chunk with overlap
+            start = Math.max(0, adjustedEnd - overlapChars);
+        }
+
+        return index;
     }
 }

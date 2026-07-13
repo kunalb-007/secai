@@ -46,7 +46,7 @@ class DocxParserTest {
 
         assertThat(result.questions()).hasSize(3);
         assertThat(result.questions().get(0).category()).isEqualTo("Access Control");
-        assertThat(result.questions().get(0).questionNumber()).isEqualTo("1.");
+        assertThat(result.questions().get(0).questionNumber()).isEqualTo("1");
         assertThat(result.questions().get(0).questionText())
                 .isEqualTo("Do you enforce multi-factor authentication for all users?");
     }
