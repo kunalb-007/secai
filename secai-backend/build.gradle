@@ -53,6 +53,12 @@ dependencies {
 	implementation 'org.springframework.retry:spring-retry'
 	implementation 'org.springframework:spring-aspects'
 
+	// OpenCSV
+	implementation 'com.opencsv:opencsv:5.9'
+
+	// Apache Commons IO
+	implementation 'commons-io:commons-io:2.16.1'
+
 	// Lombok
 	compileOnly 'org.projectlombok:lombok'
 	annotationProcessor 'org.projectlombok:lombok'

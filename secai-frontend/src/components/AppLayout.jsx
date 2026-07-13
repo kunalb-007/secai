@@ -1,8 +1,9 @@
-// src/components/AppLayout.jsx
+// src/components/AppLayout.jsx  — REPLACE ENTIRE FILE
 import { Layout, Menu, Button, Typography } from 'antd';
 import {
     SafetyCertificateOutlined, FileTextOutlined,
     UploadOutlined, LogoutOutlined,
+    FileExcelOutlined, PlusOutlined,
 } from '@ant-design/icons';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
@@ -15,28 +16,25 @@ export default function AppLayout({ children }) {
     const navigate         = useNavigate();
     const location         = useLocation();
 
-    const handleLogout = () => {
-        logout();
-        navigate('/login');
-    };
+    const handleLogout = () => { logout(); navigate('/login'); };
 
-    // Derive selected menu key from current URL
     const selectedKey = (() => {
-        if (location.pathname.startsWith('/documents/upload'))  return 'upload-doc';
-        if (location.pathname.startsWith('/documents'))         return 'documents';
+        if (location.pathname === '/questionnaires/upload') return 'q-upload';
+        if (location.pathname.startsWith('/questionnaires')) return 'questionnaires';
+        if (location.pathname === '/documents/upload')      return 'doc-upload';
+        if (location.pathname.startsWith('/documents'))     return 'documents';
         return 'dashboard';
     })();
 
     return (
         <Layout style={{ minHeight: '100vh' }}>
-            <Sider width={220} theme="dark">
+            <Sider width={230} theme="dark">
                 {/* Logo */}
                 <div style={{ padding: '16px 20px', color: 'white', fontSize: 16 }}>
                     <SafetyCertificateOutlined style={{ fontSize: 18, marginRight: 8 }} />
                     <strong>SecAI</strong>
                 </div>
 
-                {/* Nav items */}
                 <Menu
                     theme="dark"
                     mode="inline"
@@ -48,25 +46,54 @@ export default function AppLayout({ children }) {
                             label: <Link to="/dashboard">Dashboard</Link>,
                         },
                         {
-                            key: 'documents',
-                            icon: <FileTextOutlined />,
-                            label: <Link to="/documents">Documents</Link>,
+                            type: 'divider',
+                            style: { borderColor: 'rgba(255,255,255,0.1)', margin: '8px 0' },
                         },
                         {
-                            key: 'upload-doc',
-                            icon: <UploadOutlined />,
-                            label: <Link to="/documents/upload">Upload Doc</Link>,
+                            key: 'documents-group',
+                            type: 'group',
+                            label: <Text style={{ color: 'rgba(255,255,255,0.45)', fontSize: 11 }}>DOCUMENTS</Text>,
+                            children: [
+                                {
+                                    key: 'documents',
+                                    icon: <FileTextOutlined />,
+                                    label: <Link to="/documents">All Documents</Link>,
+                                },
+                                {
+                                    key: 'doc-upload',
+                                    icon: <UploadOutlined />,
+                                    label: <Link to="/documents/upload">Upload Doc</Link>,
+                                },
+                            ],
+                        },
+                        {
+                            type: 'divider',
+                            style: { borderColor: 'rgba(255,255,255,0.1)', margin: '8px 0' },
+                        },
+                        {
+                            key: 'questionnaires-group',
+                            type: 'group',
+                            label: <Text style={{ color: 'rgba(255,255,255,0.45)', fontSize: 11 }}>QUESTIONNAIRES</Text>,
+                            children: [
+                                {
+                                    key: 'questionnaires',
+                                    icon: <FileExcelOutlined />,
+                                    label: <Link to="/questionnaires">All Questionnaires</Link>,
+                                },
+                                {
+                                    key: 'q-upload',
+                                    icon: <PlusOutlined />,
+                                    label: <Link to="/questionnaires/upload">Upload Questionnaire</Link>,
+                                },
+                            ],
                         },
                     ]}
                 />
 
-                {/* Sign out at bottom */}
+                {/* Sign out */}
                 <div style={{
-                    position: 'absolute',
-                    bottom: 16,
-                    left: 0,
-                    right: 0,
-                    padding: '0 12px',
+                    position: 'absolute', bottom: 16,
+                    left: 0, right: 0, padding: '0 12px',
                 }}>
                     <Button
                         type="text"
@@ -81,24 +108,15 @@ export default function AppLayout({ children }) {
 
             <Layout>
                 <Header style={{
-                    background: '#fff',
-                    padding: '0 24px',
+                    background: '#fff', padding: '0 24px',
                     borderBottom: '1px solid #f0f0f0',
-                    display: 'flex',
-                    alignItems: 'center',
+                    display: 'flex', alignItems: 'center',
                     justifyContent: 'space-between',
                 }}>
-                    <Text type="secondary" style={{ fontWeight: 500 }}>
-                        {user?.orgName}
-                    </Text>
-                    <Text type="secondary" style={{ fontSize: 13 }}>
-                        {user?.email}
-                    </Text>
+                    <Text type="secondary" style={{ fontWeight: 500 }}>{user?.orgName}</Text>
+                    <Text type="secondary" style={{ fontSize: 13 }}>{user?.email}</Text>
                 </Header>
-
-                <Content>
-                    {children}
-                </Content>
+                <Content>{children}</Content>
             </Layout>
         </Layout>
     );
