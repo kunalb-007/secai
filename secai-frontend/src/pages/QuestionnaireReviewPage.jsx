@@ -1,23 +1,24 @@
-// src/pages/QuestionnaireReviewPage.jsx  — NEW FILE (Phase 5)
-import { useEffect, useState, useCallback, useRef } from 'react';
+// src/pages/QuestionnaireReviewPage.jsx
+import {
+    useEffect, useState, useCallback, useMemo, useRef,
+} from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-    Table, Tag, Button, Typography, Alert, Spin,
-    Card, Progress, Modal, Input, Space, Tooltip,
-    Badge, Select, Row, Col, Statistic, message,
-    Popconfirm,
+    Table, Tag, Button, Typography, Alert, Spin, Card,
+    Progress, Modal, Input, Space, Tooltip, Badge, Select,
+    Row, Col, Statistic, message, Checkbox, Popconfirm, Dropdown,
 } from 'antd';
 import {
-    ArrowLeftOutlined, RobotOutlined, CheckOutlined,
-    CloseOutlined, EditOutlined, ReloadOutlined,
-    CheckCircleOutlined, WarningOutlined,
-    ExclamationCircleOutlined, ThunderboltOutlined,
-    DownloadOutlined,
+    ArrowLeftOutlined, RobotOutlined, CheckOutlined, CloseOutlined,
+    EditOutlined, ReloadOutlined, CheckCircleOutlined,
+    ThunderboltOutlined, DownloadOutlined, FilterOutlined,
+    WarningOutlined, ExclamationCircleOutlined, DownOutlined,
 } from '@ant-design/icons';
 import AppLayout from '../components/AppLayout';
 import {
     getQuestionnaire, getQuestions, startGeneration,
     editQuestion, approveQuestion, rejectQuestion,
+    bulkApprove, exportQuestionnaire,
 } from '../api/questionnaires';
 import { useGenerationPoller } from '../hooks/useGenerationPoller';
 import dayjs from 'dayjs';
@@ -25,214 +26,286 @@ import relativeTime from 'dayjs/plugin/relativeTime';
 
 dayjs.extend(relativeTime);
 
-const { Title, Text, Paragraph } = Typography;
+const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
-const { Option } = Select;
+const { Option }  = Select;
 
-// ── Confidence score → colour mapping ─────────────────────────────────────────
-// Green: ≥ 0.80 (high confidence)
-// Yellow: 0.50–0.79 (medium)
-// Red: < 0.50 (low — needs manual review)
-function scoreToColor(score) {
-    if (score == null) return '#d9d9d9';
-    if (score >= 0.80) return '#52c41a';
-    if (score >= 0.50) return '#faad14';
-    return '#ff4d4f';
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────────
 
-function scoreToRowClass(score) {
-    if (score == null || score >= 0.80) return '';
-    if (score >= 0.50) return 'row-yellow';
-    return 'row-red';
-}
-
-const STATUS_TAG = {
-    PENDING:   { color: 'default',    label: 'Pending'   },
-    GENERATED: { color: 'processing', label: 'AI Answer' },
-    APPROVED:  { color: 'success',    label: 'Approved'  },
-    EDITED:    { color: 'cyan',       label: 'Edited'    },
-    REJECTED:  { color: 'error',      label: 'Rejected'  },
+const SCORE_BAND = (score) => {
+    if (score == null) return null;
+    if (score >= 0.80) return 'high';
+    if (score >= 0.50) return 'medium';
+    return 'low';
 };
 
-// ── Edit Modal ─────────────────────────────────────────────────────────────────
-function EditModal({ question, visible, onSave, onCancel, saving }) {
+const BAND_COLORS = {
+    high:   { bg: '#f6ffed', border: '#b7eb8f', badge: '#52c41a', text: '#135200' },
+    medium: { bg: '#fffbe6', border: '#ffe58f', badge: '#faad14', text: '#614700' },
+    low:    { bg: '#fff2f0', border: '#ffccc7', badge: '#ff4d4f', text: '#820014' },
+};
+
+const STATUS_CFG = {
+    PENDING:   { color: 'default',    label: 'Pending'    },
+    GENERATED: { color: 'processing', label: 'AI Answer'  },
+    APPROVED:  { color: 'success',    label: 'Approved'   },
+    EDITED:    { color: 'cyan',       label: 'Edited'     },
+    REJECTED:  { color: 'error',      label: 'Rejected'   },
+};
+
+// Filter options shown in the dropdown
+const FILTER_OPTIONS = [
+    { value: '',               label: 'All questions'    },
+    { value: 'GENERATED',     label: 'AI answers (unreviewed)' },
+    { value: 'low_confidence', label: '⚠ Low confidence (< 50%)' },
+    { value: 'PENDING',        label: 'Pending (no answer yet)' },
+    { value: 'APPROVED',       label: 'Approved'         },
+    { value: 'EDITED',         label: 'Edited'           },
+    { value: 'REJECTED',       label: 'Rejected'         },
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edit Modal
+// ─────────────────────────────────────────────────────────────────────────────
+
+function EditModal({ question, open, onSave, onCancel, saving }) {
     const [value, setValue] = useState('');
 
     useEffect(() => {
-        if (visible && question) {
-            // Pre-fill with manual_answer if one exists, else ai_answer
+        if (open && question) {
             setValue(question.manualAnswer || question.aiAnswer || '');
         }
-    }, [visible, question]);
+    }, [open, question]);
 
     return (
         <Modal
-            title={
-                <Space>
-                    <EditOutlined />
-                    Edit Answer
-                </Space>
-            }
-            open={visible}
+            title={<Space><EditOutlined /> Edit Answer</Space>}
+            open={open}
             onCancel={onCancel}
             onOk={() => onSave(value)}
             okText="Save Answer"
             cancelText="Cancel"
             confirmLoading={saving}
-            width={680}
+            width={700}
             destroyOnClose
         >
             {question && (
-                <>
-                    {/* Question context */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+
+                    {/* Question context banner */}
                     <div style={{
-                        background: '#f5f5f5',
-                        borderRadius: 6,
-                        padding: '10px 14px',
-                        marginBottom: 16,
+                        background: '#f5f5f5', borderRadius: 6,
+                        padding: '10px 14px', borderLeft: '3px solid #1890ff',
                     }}>
-                        <Text type="secondary" style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.05em' }}>
-                            {question.questionNumber && `${question.questionNumber} · `}
-                            {question.category || 'Question'}
+                        <Text type="secondary" style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                            {[question.questionNumber, question.category].filter(Boolean).join(' · ') || 'Question'}
                         </Text>
-                        <Paragraph style={{ margin: '4px 0 0', fontWeight: 500 }}>
+                        <Paragraph style={{ margin: '6px 0 0', fontWeight: 500, fontSize: 14 }}>
                             {question.questionText}
                         </Paragraph>
                     </div>
 
                     {/* AI answer for reference */}
                     {question.aiAnswer && (
-                        <div style={{ marginBottom: 14 }}>
-                            <Text type="secondary" style={{ fontSize: 12 }}>
-                                AI answer (for reference):
+                        <div>
+                            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
+                                AI answer <span style={{ color: '#8c8c8c' }}>(for reference — not saved unless you keep it)</span>
                             </Text>
                             <div style={{
-                                padding: '8px 12px',
-                                background: '#e6f4ff',
-                                borderRadius: 4,
-                                marginTop: 4,
-                                fontSize: 13,
-                                color: '#1677ff',
+                                padding: '8px 12px', background: '#e6f4ff',
+                                borderRadius: 4, fontSize: 13, color: '#0958d9',
+                                lineHeight: 1.6,
                             }}>
                                 {question.aiAnswer}
                             </div>
                             {question.evidence && question.evidence !== 'N/A' && (
-                                <Text type="secondary" style={{ fontSize: 11, marginTop: 4, display: 'block' }}>
-                                    Evidence: {question.evidence}
+                                <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
+                                    📄 Source: {question.evidence}
                                 </Text>
                             )}
                         </div>
                     )}
 
-                    {/* Editable answer */}
+                    {/* Editable textarea */}
                     <div>
-                        <Text strong style={{ fontSize: 13 }}>Your answer:</Text>
+                        <Text strong style={{ fontSize: 13, display: 'block', marginBottom: 6 }}>
+                            Your answer:
+                        </Text>
                         <TextArea
                             value={value}
                             onChange={(e) => setValue(e.target.value)}
                             rows={5}
                             placeholder="Type your answer here…"
-                            style={{ marginTop: 6 }}
                             autoFocus
+                            style={{ fontSize: 13 }}
                         />
+                        <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
+                            This will be saved as the final answer in the export.
+                        </Text>
                     </div>
-                </>
+                </div>
             )}
         </Modal>
     );
 }
 
-// ── Main component ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Score badge
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ScoreBadge({ score }) {
+    if (score == null) return <Text type="secondary" style={{ fontSize: 12 }}>—</Text>;
+    const band   = SCORE_BAND(score);
+    const colors = BAND_COLORS[band];
+    const pct    = Math.round(score * 100);
+    return (
+        <Tooltip title={
+            band === 'high'   ? 'High confidence — answer is likely correct' :
+                band === 'medium' ? 'Medium confidence — review recommended' :
+                    'Low confidence — manual review required'
+        }>
+      <span style={{
+          display: 'inline-block',
+          padding: '2px 8px',
+          borderRadius: 10,
+          background: colors.badge,
+          color: '#fff',
+          fontWeight: 700,
+          fontSize: 12,
+          cursor: 'default',
+          minWidth: 40,
+          textAlign: 'center',
+      }}>
+        {pct}%
+      </span>
+        </Tooltip>
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main Review Page
+// ─────────────────────────────────────────────────────────────────────────────
+
 export default function QuestionnaireReviewPage() {
-    const { id } = useParams();
+    const { id }   = useParams();
     const navigate = useNavigate();
 
-    // ── Data state ───────────────────────────────────────────────────────────────
-    const [detail, setDetail]           = useState(null);
-    const [questions, setQuestions]     = useState([]);
-    const [totalQ, setTotalQ]           = useState(0);
-    const [currentPage, setCurrentPage] = useState(0);
-    const [pageSize]                    = useState(50);
-    const [statusFilter, setStatusFilter] = useState('');
+    // ── Data ──────────────────────────────────────────────────────────────────
+    const [detail, setDetail]               = useState(null);
+    const [questions, setQuestions]         = useState([]);
+    const [totalQ, setTotalQ]               = useState(0);
+    const [currentPage, setCurrentPage]     = useState(0);
+    const PAGE_SIZE                         = 50;
+    const [activeFilter, setActiveFilter]   = useState('');   // '' = all
     const [loadingDetail, setLoadingDetail] = useState(true);
-    const [loadingQ, setLoadingQ]       = useState(false);
-    const [pageError, setPageError]     = useState('');
+    const [loadingQ, setLoadingQ]           = useState(false);
+    const [pageError, setPageError]         = useState('');
 
-    // ── Generation state ─────────────────────────────────────────────────────────
-    const [generating, setGenerating]   = useState(false);
-    const [genError, setGenError]       = useState('');
+    // ── Generation ────────────────────────────────────────────────────────────
+    const [generating, setGenerating]  = useState(false);
+    const [genError, setGenError]      = useState('');
+    const [pollId, setPollId]          = useState(null);
 
-    // ── Review/edit state ────────────────────────────────────────────────────────
-    const [editingQuestion, setEditingQuestion] = useState(null);
-    const [editModalOpen, setEditModalOpen]     = useState(false);
-    const [savingEdit, setSavingEdit]           = useState(false);
-    const [actionLoading, setActionLoading]     = useState({}); // { [questionId]: true }
+    // ── Selection (bulk actions) ──────────────────────────────────────────────
+    const [selectedIds, setSelectedIds] = useState([]);
 
-    // ── Generation polling ────────────────────────────────────────────────────────
-    // Only poll while we know generation is running (set by startGeneration or
-    // when initial load shows RUNNING status).
-    const [pollId, setPollId] = useState(null);
+    // ── Edit modal ────────────────────────────────────────────────────────────
+    const [editTarget, setEditTarget]   = useState(null);
+    const [editOpen, setEditOpen]       = useState(false);
+    const [savingEdit, setSavingEdit]   = useState(false);
+
+    // ── Per-row action loading ─────────────────────────────────────────────────
+    const [rowLoading, setRowLoading]   = useState({});
+
+    // ── Export ────────────────────────────────────────────────────────────────
+    const [exporting, setExporting]     = useState(false);
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Generation polling
+    // ─────────────────────────────────────────────────────────────────────────
 
     const onGenerationComplete = useCallback((finalJob) => {
         setPollId(null);
         setGenerating(false);
         if (finalJob.status === 'FAILED') {
-            setGenError('Generation failed. Some questions may not have answers. Please try again.');
+            setGenError('Generation failed. Some questions may need manual answers.');
         }
-        // Refresh questions to show AI answers
-        fetchQuestions(0, '');
+        fetchQuestions(0, activeFilter);
         fetchDetail();
-    }, []); // eslint-disable-line
+    }, [activeFilter]); // eslint-disable-line
 
     const { job: liveJob } = useGenerationPoller(pollId, onGenerationComplete);
 
-    // ── Fetchers ──────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    // Fetchers
+    // ─────────────────────────────────────────────────────────────────────────
+
     const fetchDetail = useCallback(async () => {
         try {
             const res = await getQuestionnaire(id);
             setDetail(res.data);
-
-            // If generation is already running when we load the page, start polling
             if (res.data?.aiJob?.status === 'RUNNING') {
                 setGenerating(true);
                 setPollId(id);
             }
         } catch {
-            setPageError('Questionnaire not found or you do not have access.');
+            setPageError('Questionnaire not found.');
         } finally {
             setLoadingDetail(false);
         }
     }, [id]);
 
-    const fetchQuestions = useCallback(async (page = 0, status = '') => {
+    const fetchQuestions = useCallback(async (page = 0, filter = '') => {
         setLoadingQ(true);
+        setSelectedIds([]);
         try {
-            const res = await getQuestions(id, { status, page, size: pageSize });
-            setQuestions(res.data.content);
-            setTotalQ(res.data.totalElements);
+            // "low_confidence" is a client-side filter — request GENERATED from server
+            // then filter by score < 0.50 locally
+            const serverFilter = filter === 'low_confidence' ? 'GENERATED' : filter;
+            const res = await getQuestions(id, {
+                filter: serverFilter, page, size: PAGE_SIZE,
+            });
+
+            let content = res.data.content;
+            let total   = res.data.totalElements;
+
+            // Client-side low-confidence sub-filter
+            if (filter === 'low_confidence') {
+                content = content.filter((q) => q.retrievalScore != null && q.retrievalScore < 0.50);
+                total   = content.length;
+            }
+
+            setQuestions(content);
+            setTotalQ(total);
         } catch {
             setPageError('Failed to load questions.');
         } finally {
             setLoadingQ(false);
         }
-    }, [id, pageSize]);
+    }, [id]);
 
     useEffect(() => {
         fetchDetail();
         fetchQuestions(0, '');
     }, [fetchDetail, fetchQuestions]);
 
+    // Re-fetch when filter or page changes
     useEffect(() => {
-        fetchQuestions(currentPage, statusFilter);
-    }, [currentPage, statusFilter]); // eslint-disable-line
+        fetchQuestions(currentPage, activeFilter);
+    }, [currentPage, activeFilter]); // eslint-disable-line
 
-    // ── Generation trigger ────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    // Generation
+    // ─────────────────────────────────────────────────────────────────────────
+
     const handleGenerate = async () => {
         setGenError('');
         setGenerating(true);
         try {
             await startGeneration(id);
-            setPollId(id); // start polling
+            setPollId(id);
             fetchDetail();
         } catch (err) {
             setGenerating(false);
@@ -240,111 +313,196 @@ export default function QuestionnaireReviewPage() {
         }
     };
 
-    // ── Review actions ────────────────────────────────────────────────────────────
-    const setActionState = (qId, loading) =>
-        setActionLoading((prev) => ({ ...prev, [qId]: loading }));
+    // ─────────────────────────────────────────────────────────────────────────
+    // Single-row actions
+    // ─────────────────────────────────────────────────────────────────────────
+
+    const setRowBusy = (qid, busy) =>
+        setRowLoading((prev) => ({ ...prev, [qid]: busy }));
+
+    const patchQuestion = (updated) =>
+        setQuestions((prev) => prev.map((q) => q.id === updated.id ? updated : q));
 
     const handleApprove = async (question) => {
-        setActionState(question.id, true);
+        setRowBusy(question.id, true);
         try {
             const res = await approveQuestion(question.id);
-            updateQuestionInList(res.data);
-            message.success('Answer approved');
+            patchQuestion(res.data);
+            fetchDetail();
+            message.success('Approved');
         } catch {
-            message.error('Failed to approve. Please try again.');
+            message.error('Could not approve. Please try again.');
         } finally {
-            setActionState(question.id, false);
+            setRowBusy(question.id, false);
         }
     };
 
     const handleReject = async (question) => {
-        setActionState(question.id, true);
+        setRowBusy(question.id, true);
         try {
             const res = await rejectQuestion(question.id);
-            updateQuestionInList(res.data);
-            message.warning('Answer rejected');
+            patchQuestion(res.data);
+            fetchDetail();
+            message.warning('Rejected');
         } catch {
-            message.error('Failed to reject. Please try again.');
+            message.error('Could not reject. Please try again.');
         } finally {
-            setActionState(question.id, false);
+            setRowBusy(question.id, false);
         }
     };
 
-    const handleOpenEdit = (question) => {
-        setEditingQuestion(question);
-        setEditModalOpen(true);
+    const openEdit = (question) => {
+        setEditTarget(question);
+        setEditOpen(true);
     };
 
     const handleSaveEdit = async (newAnswer) => {
-        if (!editingQuestion) return;
+        if (!editTarget) return;
         setSavingEdit(true);
         try {
-            const res = await editQuestion(editingQuestion.id, newAnswer);
-            updateQuestionInList(res.data);
-            setEditModalOpen(false);
-            setEditingQuestion(null);
+            const res = await editQuestion(editTarget.id, newAnswer);
+            patchQuestion(res.data);
+            setEditOpen(false);
+            setEditTarget(null);
+            fetchDetail();
             message.success('Answer saved');
         } catch {
-            message.error('Failed to save. Please try again.');
+            message.error('Could not save. Please try again.');
         } finally {
             setSavingEdit(false);
         }
     };
 
-    // Update a single question in the local list without re-fetching the page
-    const updateQuestionInList = (updatedQ) => {
-        setQuestions((prev) =>
-            prev.map((q) => q.id === updatedQ.id ? updatedQ : q)
-        );
-        // Refresh detail so status counts are accurate
-        fetchDetail();
+    // ─────────────────────────────────────────────────────────────────────────
+    // Bulk approve
+    // ─────────────────────────────────────────────────────────────────────────
+
+    const handleBulkApprove = async () => {
+        if (!selectedIds.length) return;
+        try {
+            const res = await bulkApprove(id, selectedIds);
+            message.success(`${res.data.approved} answers approved`);
+            setSelectedIds([]);
+            fetchQuestions(currentPage, activeFilter);
+            fetchDetail();
+        } catch {
+            message.error('Bulk approve failed. Please try again.');
+        }
     };
 
-    // ── Stats from detail ─────────────────────────────────────────────────────────
-    const statusCounts   = detail?.statusCounts   || {};
-    const pendingCount   = statusCounts.PENDING    || 0;
-    const generatedCount = statusCounts.GENERATED  || 0;
-    const approvedCount  = statusCounts.APPROVED   || 0;
-    const editedCount    = statusCounts.EDITED     || 0;
-    const rejectedCount  = statusCounts.REJECTED   || 0;
-    const totalCount     = detail?.totalQuestions  || 0;
+    // ─────────────────────────────────────────────────────────────────────────
+    // Export
+    // ─────────────────────────────────────────────────────────────────────────
+
+    const handleExport = async () => {
+        setExporting(true);
+        try {
+            const res = await exportQuestionnaire(id);
+            // Create a blob URL and trigger browser download
+            const blob = new Blob([res.data], {
+                type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            });
+            const url  = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href  = url;
+
+            // Extract filename from Content-Disposition header if present
+            const disposition = res.headers?.['content-disposition'] || '';
+            const match       = disposition.match(/filename="?([^";]+)"?/);
+            link.download     = match ? match[1] : `questionnaire_answers.xlsx`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+            message.success('Export downloaded');
+        } catch {
+            message.error('Export failed. Please try again.');
+        } finally {
+            setExporting(false);
+        }
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Derived stats
+    // ─────────────────────────────────────────────────────────────────────────
+
+    const sc            = detail?.statusCounts || {};
+    const pendingCount  = sc.PENDING    || 0;
+    const genCount      = sc.GENERATED  || 0;
+    const approvedCount = sc.APPROVED   || 0;
+    const editedCount   = sc.EDITED     || 0;
+    const rejectedCount = sc.REJECTED   || 0;
+    const totalCount    = detail?.totalQuestions || 0;
+
+    // Low confidence: questions whose retrievalScore < 0.50 — computed from current page only
+    // (full count requires a DB aggregate; shown as an approximate on current page)
+    const lowConfCount = questions.filter(
+        (q) => q.retrievalScore != null && q.retrievalScore < 0.50
+    ).length;
+
     const reviewedCount  = approvedCount + editedCount;
     const reviewProgress = totalCount ? Math.round((reviewedCount / totalCount) * 100) : 0;
 
-    // ── Generation progress info ──────────────────────────────────────────────────
-    const activeJob   = liveJob || detail?.aiJob;
-    const isRunning   = generating || activeJob?.status === 'RUNNING';
-    const genProgress = activeJob?.progressPercent ?? 0;
-    const genMessage  = activeJob?.statusMessage   ?? '';
-
-    // ── Compute whether generation can be triggered ───────────────────────────────
+    const activeJob  = liveJob || detail?.aiJob;
+    const isRunning  = generating || activeJob?.status === 'RUNNING';
+    const isComplete = activeJob?.status === 'COMPLETED';
     const canGenerate = !isRunning
-        && activeJob?.status !== 'RUNNING'
-        && (activeJob?.status === 'PENDING' || activeJob?.status === 'FAILED' || !activeJob);
+        && (activeJob?.status === 'PENDING'
+            || activeJob?.status === 'FAILED'
+            || !activeJob);
 
-    // ── Table columns ─────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    // Row selection config
+    // ─────────────────────────────────────────────────────────────────────────
+
+    const rowSelection = {
+        selectedRowKeys: selectedIds,
+        onChange: (keys) => setSelectedIds(keys),
+        getCheckboxProps: (record) => ({
+            // Only allow selecting answerable rows
+            disabled: record.status === 'PENDING',
+        }),
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Row background colour
+    // ─────────────────────────────────────────────────────────────────────────
+
+    const rowClassName = (record) => {
+        const band = SCORE_BAND(record.retrievalScore);
+        if (band === 'medium') return 'review-row-yellow';
+        if (band === 'low')    return 'review-row-red';
+        return '';
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Table columns
+    // ─────────────────────────────────────────────────────────────────────────
+
     const columns = [
         {
             title: '#',
             dataIndex: 'questionNumber',
-            width: 60,
+            width: 58,
             render: (v) => v
                 ? <Text code style={{ fontSize: 11 }}>{v}</Text>
-                : <Text type="secondary">—</Text>,
+                : <Text type="secondary" style={{ fontSize: 12 }}>—</Text>,
         },
         {
             title: 'Category',
             dataIndex: 'category',
-            width: 140,
+            width: 130,
             ellipsis: true,
-            render: (v) => v ? <Tag style={{ fontSize: 11 }}>{v}</Tag> : null,
+            render: (v) => v
+                ? <Tag style={{ fontSize: 11, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }}>{v}</Tag>
+                : null,
         },
         {
             title: 'Question',
             dataIndex: 'questionText',
             width: '26%',
             render: (text) => (
-                <Text style={{ fontSize: 13 }}>{text}</Text>
+                <Text style={{ fontSize: 13, lineHeight: 1.5 }}>{text}</Text>
             ),
         },
         {
@@ -352,24 +510,32 @@ export default function QuestionnaireReviewPage() {
             dataIndex: 'aiAnswer',
             render: (answer, record) => {
                 if (!answer) {
-                    return <Text type="secondary" style={{ fontStyle: 'italic' }}>Not yet generated</Text>;
+                    return (
+                        <Text type="secondary" style={{ fontSize: 12, fontStyle: 'italic' }}>
+                            Not yet generated
+                        </Text>
+                    );
                 }
-                // Show manual_answer with a flag if EDITED
-                const displayAnswer = record.status === 'EDITED' && record.manualAnswer
-                    ? record.manualAnswer
-                    : answer;
+
+                const displayAnswer =
+                    (record.status === 'EDITED' || record.status === 'REJECTED') && record.manualAnswer
+                        ? record.manualAnswer
+                        : answer;
+
+                const isEdited = record.status === 'EDITED' && record.manualAnswer;
+
                 return (
                     <div>
-                        <Text style={{ fontSize: 13 }}>{displayAnswer}</Text>
+                        <Text style={{ fontSize: 13, lineHeight: 1.5 }}>{displayAnswer}</Text>
+                        {isEdited && (
+                            <Tag color="cyan" style={{ marginLeft: 6, fontSize: 10 }}>Edited</Tag>
+                        )}
                         {record.evidence && record.evidence !== 'N/A' && (
                             <div style={{ marginTop: 4 }}>
                                 <Text type="secondary" style={{ fontSize: 11 }}>
                                     📄 {record.evidence}
                                 </Text>
                             </div>
-                        )}
-                        {record.status === 'EDITED' && record.manualAnswer && (
-                            <Tag color="cyan" style={{ marginTop: 4, fontSize: 10 }}>Edited</Tag>
                         )}
                     </div>
                 );
@@ -378,73 +544,50 @@ export default function QuestionnaireReviewPage() {
         {
             title: 'Score',
             dataIndex: 'retrievalScore',
-            width: 80,
+            width: 72,
             align: 'center',
-            render: (score) => {
-                if (score == null) return <Text type="secondary">—</Text>;
-                return (
-                    <Tooltip title={`Retrieval confidence: ${(score * 100).toFixed(0)}%`}>
-                        <div style={{
-                            display: 'inline-block',
-                            padding: '2px 8px',
-                            borderRadius: 10,
-                            background: scoreToColor(score),
-                            color: '#fff',
-                            fontWeight: 700,
-                            fontSize: 12,
-                            cursor: 'default',
-                        }}>
-                            {(score * 100).toFixed(0)}%
-                        </div>
-                    </Tooltip>
-                );
-            },
+            render: (score) => <ScoreBadge score={score} />,
         },
         {
             title: 'Status',
             dataIndex: 'status',
             width: 100,
             render: (s) => {
-                const cfg = STATUS_TAG[s] || { color: 'default', label: s };
-                return <Tag color={cfg.color}>{cfg.label}</Tag>;
+                const cfg = STATUS_CFG[s] || { color: 'default', label: s };
+                return <Tag color={cfg.color} style={{ fontSize: 11 }}>{cfg.label}</Tag>;
             },
         },
         {
             title: 'Actions',
-            width: 130,
+            width: 118,
             render: (_, record) => {
                 if (!record.aiAnswer) return null;
-                const loading = actionLoading[record.id];
-
+                const busy = rowLoading[record.id];
                 return (
-                    <Space size={4}>
+                    <Space size={2}>
                         <Tooltip title="Edit answer">
                             <Button
-                                type="text"
+                                type="text" size="small"
                                 icon={<EditOutlined />}
-                                size="small"
-                                onClick={() => handleOpenEdit(record)}
-                                disabled={loading}
+                                onClick={() => openEdit(record)}
+                                disabled={busy}
                             />
                         </Tooltip>
                         <Tooltip title="Approve">
                             <Button
-                                type="text"
+                                type="text" size="small"
                                 icon={<CheckOutlined style={{ color: '#52c41a' }} />}
-                                size="small"
                                 onClick={() => handleApprove(record)}
-                                loading={loading}
+                                loading={busy}
                                 disabled={record.status === 'APPROVED'}
                             />
                         </Tooltip>
                         <Tooltip title="Reject">
                             <Button
-                                type="text"
-                                danger
+                                type="text" size="small" danger
                                 icon={<CloseOutlined />}
-                                size="small"
                                 onClick={() => handleReject(record)}
-                                loading={loading}
+                                loading={busy}
                                 disabled={record.status === 'REJECTED'}
                             />
                         </Tooltip>
@@ -454,7 +597,10 @@ export default function QuestionnaireReviewPage() {
         },
     ];
 
-    // ── Loading state ─────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    // Loading / error states
+    // ─────────────────────────────────────────────────────────────────────────
+
     if (loadingDetail) {
         return (
             <AppLayout>
@@ -470,11 +616,8 @@ export default function QuestionnaireReviewPage() {
             <AppLayout>
                 <div style={{ padding: 24 }}>
                     <Alert type="error" message={pageError} showIcon />
-                    <Button
-                        icon={<ArrowLeftOutlined />}
-                        style={{ marginTop: 16 }}
-                        onClick={() => navigate('/questionnaires')}
-                    >
+                    <Button icon={<ArrowLeftOutlined />} style={{ marginTop: 16 }}
+                            onClick={() => navigate('/questionnaires')}>
                         Back to Questionnaires
                     </Button>
                 </div>
@@ -482,150 +625,195 @@ export default function QuestionnaireReviewPage() {
         );
     }
 
-    // ── Render ────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    // Render
+    // ─────────────────────────────────────────────────────────────────────────
+
     return (
         <AppLayout>
-            <div style={{ padding: 24, maxWidth: 1200 }}>
+            <div style={{ padding: 24, maxWidth: 1300 }}>
 
                 {/* ── Page header ──────────────────────────────────────────────── */}
                 <div style={{
                     display: 'flex', justifyContent: 'space-between',
-                    alignItems: 'flex-start', marginBottom: 20,
+                    alignItems: 'flex-start', marginBottom: 18,
                 }}>
                     <div>
-                        <Button
-                            type="text"
-                            icon={<ArrowLeftOutlined />}
-                            onClick={() => navigate('/questionnaires')}
-                            style={{ paddingLeft: 0, marginBottom: 4 }}
-                        >
+                        <Button type="text" icon={<ArrowLeftOutlined />}
+                                onClick={() => navigate('/questionnaires')}
+                                style={{ paddingLeft: 0, marginBottom: 4 }}>
                             All Questionnaires
                         </Button>
-                        <Title level={4} style={{ margin: 0 }}>
-                            {detail?.filename}
-                        </Title>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                            <Text style={{ fontSize: 20, fontWeight: 700 }}>
+                                {detail?.filename}
+                            </Text>
+                            {detail?.originalFormat && (
+                                <Tag color={{ XLSX: 'green', CSV: 'blue', DOCX: 'purple' }[detail.originalFormat]}>
+                                    {detail.originalFormat}
+                                </Tag>
+                            )}
+                        </div>
                         <Text type="secondary" style={{ fontSize: 13 }}>
                             {totalCount} questions · Uploaded {dayjs(detail?.uploadedAt).fromNow()}
                         </Text>
                     </div>
 
                     <Space>
-                        <Button
-                            icon={<ReloadOutlined />}
-                            onClick={() => { fetchDetail(); fetchQuestions(currentPage, statusFilter); }}
-                        >
+                        <Button icon={<ReloadOutlined />}
+                                onClick={() => { fetchDetail(); fetchQuestions(currentPage, activeFilter); }}>
                             Refresh
                         </Button>
 
-                        {/* Generate answers button */}
+                        {/* Generate button */}
                         <Button
-                            type="primary"
+                            type={canGenerate ? 'primary' : 'default'}
                             icon={<ThunderboltOutlined />}
                             onClick={handleGenerate}
                             loading={isRunning}
                             disabled={!canGenerate}
+                            ghost={!canGenerate && isComplete}
                         >
-                            {isRunning ? 'Generating…' : 'Generate Answers'}
+                            {isRunning ? 'Generating…' : isComplete ? 'Re-generate' : 'Generate Answers'}
                         </Button>
 
-                        {/* Export button — placeholder for Phase 7 */}
-                        <Tooltip title="Export coming in Phase 7">
-                            <Button icon={<DownloadOutlined />} disabled>
-                                Export Excel
+                        {/* Export button — Phase 7 */}
+                        <Dropdown
+                            menu={{
+                                items: [
+                                    {
+                                        key: 'xlsx',
+                                        label: 'Download as Excel (.xlsx)',
+                                        icon: <DownloadOutlined />,
+                                        onClick: handleExport,
+                                    },
+                                ],
+                            }}
+                            trigger={['click']}
+                        >
+                            <Button
+                                icon={<DownloadOutlined />}
+                                loading={exporting}
+                                disabled={totalCount === 0}
+                            >
+                                Export <DownOutlined />
                             </Button>
-                        </Tooltip>
+                        </Dropdown>
                     </Space>
                 </div>
 
-                {/* ── Error alerts ─────────────────────────────────────────────── */}
+                {/* ── Alert strip ──────────────────────────────────────────────── */}
                 {pageError && (
                     <Alert type="error" message={pageError} showIcon closable
-                           style={{ marginBottom: 16 }} onClose={() => setPageError('')} />
+                           style={{ marginBottom: 12 }} onClose={() => setPageError('')} />
                 )}
                 {genError && (
                     <Alert type="error" message={genError} showIcon closable
-                           style={{ marginBottom: 16 }} onClose={() => setGenError('')} />
+                           style={{ marginBottom: 12 }} onClose={() => setGenError('')} />
                 )}
 
-                {/* ── Generation progress bar ──────────────────────────────────── */}
-                {(isRunning || activeJob?.status === 'COMPLETED') && (
+                {/* ── Generation progress ───────────────────────────────────────── */}
+                {(isRunning || isComplete) && activeJob && (
                     <Card
-                        style={{ marginBottom: 20, borderColor: isRunning ? '#1890ff' : '#52c41a' }}
-                        bodyStyle={{ padding: '16px 20px' }}
+                        style={{ marginBottom: 18, borderColor: isRunning ? '#1890ff' : '#52c41a' }}
+                        bodyStyle={{ padding: '14px 20px' }}
                     >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 12 }}>
-                            <RobotOutlined style={{
-                                fontSize: 20,
-                                color: isRunning ? '#1890ff' : '#52c41a',
-                            }} />
-                            <Text strong>
-                                {isRunning
-                                    ? genMessage || 'AI is generating answers…'
-                                    : activeJob?.statusMessage || 'Generation complete'}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10 }}>
+                            <RobotOutlined style={{ fontSize: 18, color: isRunning ? '#1890ff' : '#52c41a' }} />
+                            <Text strong style={{ fontSize: 14 }}>
+                                {activeJob.statusMessage || (isRunning ? 'Generating…' : 'Complete')}
                             </Text>
                         </div>
                         <Progress
-                            percent={isRunning ? genProgress : 100}
+                            percent={isRunning ? (activeJob.progressPercent || 0) : 100}
                             status={isRunning ? 'active' : 'success'}
-                            strokeColor={isRunning
-                                ? { from: '#108ee9', to: '#87d068' }
-                                : '#52c41a'
-                            }
-                            format={(pct) =>
+                            strokeColor={isRunning ? { from: '#108ee9', to: '#87d068' } : '#52c41a'}
+                            format={() =>
                                 isRunning
-                                    ? `${activeJob?.completedQuestions ?? 0} / ${activeJob?.totalQuestions ?? totalCount}`
-                                    : '✓ Complete'
+                                    ? `${activeJob.completedQuestions} / ${activeJob.totalQuestions}`
+                                    : `${activeJob.completedQuestions} answered`
                             }
                         />
                         {isRunning && (
                             <Text type="secondary" style={{ fontSize: 12, marginTop: 6, display: 'block' }}>
-                                Answers appear automatically as they're generated. This page updates live.
+                                Answers appear in the table as they're generated.
                             </Text>
                         )}
                     </Card>
                 )}
 
-                {/* ── Stats strip ──────────────────────────────────────────────── */}
-                <Row gutter={12} style={{ marginBottom: 20 }}>
-                    <Col span={4}>
-                        <Card size="small">
-                            <Statistic title="Total" value={totalCount}
-                                       valueStyle={{ fontSize: 20 }} />
-                        </Card>
-                    </Col>
-                    <Col span={4}>
-                        <Card size="small">
-                            <Statistic title="Pending" value={pendingCount}
-                                       valueStyle={{ fontSize: 20, color: '#8c8c8c' }} />
-                        </Card>
-                    </Col>
-                    <Col span={4}>
-                        <Card size="small">
-                            <Statistic title="AI Generated" value={generatedCount}
-                                       valueStyle={{ fontSize: 20, color: '#1890ff' }} />
-                        </Card>
-                    </Col>
-                    <Col span={4}>
-                        <Card size="small">
-                            <Statistic title="Approved" value={approvedCount}
-                                       valueStyle={{ fontSize: 20, color: '#52c41a' }} />
-                        </Card>
-                    </Col>
-                    <Col span={4}>
-                        <Card size="small">
-                            <Statistic title="Edited" value={editedCount}
-                                       valueStyle={{ fontSize: 20, color: '#13c2c2' }} />
-                        </Card>
-                    </Col>
-                    <Col span={4}>
-                        <Card size="small">
-                            <Statistic title="Rejected" value={rejectedCount}
-                                       valueStyle={{ fontSize: 20, color: '#ff4d4f' }} />
-                        </Card>
-                    </Col>
-                </Row>
+                {/* ── Stats bar (Phase 6 spec: ⚠ low conf | ✅ approved | 📝 pending) */}
+                <div style={{
+                    display: 'flex', gap: 0,
+                    marginBottom: 18,
+                    border: '1px solid #f0f0f0',
+                    borderRadius: 8,
+                    overflow: 'hidden',
+                    background: '#fff',
+                }}>
+                    {[
+                        {
+                            icon: '⚠️', label: 'Low confidence', value: lowConfCount,
+                            color: '#faad14', bg: '#fffbe6',
+                            action: () => { setActiveFilter('low_confidence'); setCurrentPage(0); },
+                            active: activeFilter === 'low_confidence',
+                        },
+                        {
+                            icon: '✅', label: 'Approved', value: approvedCount,
+                            color: '#52c41a', bg: '#f6ffed',
+                            action: () => { setActiveFilter('APPROVED'); setCurrentPage(0); },
+                            active: activeFilter === 'APPROVED',
+                        },
+                        {
+                            icon: '📝', label: 'Needs review', value: genCount,
+                            color: '#1890ff', bg: '#e6f4ff',
+                            action: () => { setActiveFilter('GENERATED'); setCurrentPage(0); },
+                            active: activeFilter === 'GENERATED',
+                        },
+                        {
+                            icon: '⏳', label: 'Pending', value: pendingCount,
+                            color: '#8c8c8c', bg: '#fafafa',
+                            action: () => { setActiveFilter('PENDING'); setCurrentPage(0); },
+                            active: activeFilter === 'PENDING',
+                        },
+                        {
+                            icon: '✏️', label: 'Edited', value: editedCount,
+                            color: '#13c2c2', bg: '#e6fffb',
+                            action: () => { setActiveFilter('EDITED'); setCurrentPage(0); },
+                            active: activeFilter === 'EDITED',
+                        },
+                        {
+                            icon: '✗', label: 'Rejected', value: rejectedCount,
+                            color: '#ff4d4f', bg: '#fff2f0',
+                            action: () => { setActiveFilter('REJECTED'); setCurrentPage(0); },
+                            active: activeFilter === 'REJECTED',
+                        },
+                    ].map(({ icon, label, value, color, bg, action, active }, i, arr) => (
+                        <button
+                            key={label}
+                            onClick={action}
+                            style={{
+                                flex: 1,
+                                border: 'none',
+                                borderRight: i < arr.length - 1 ? '1px solid #f0f0f0' : 'none',
+                                background: active ? bg : '#fff',
+                                cursor: 'pointer',
+                                padding: '12px 8px',
+                                transition: 'background 0.15s',
+                                outline: active ? `2px solid ${color}` : 'none',
+                                outlineOffset: -2,
+                            }}
+                        >
+                            <div style={{ fontSize: 18 }}>{icon}</div>
+                            <div style={{ fontWeight: 700, fontSize: 20, color, lineHeight: 1.1 }}>
+                                {value}
+                            </div>
+                            <div style={{ fontSize: 11, color: '#8c8c8c', marginTop: 2 }}>{label}</div>
+                        </button>
+                    ))}
+                </div>
 
-                {/* ── Review progress ───────────────────────────────────────────── */}
+                {/* ── Review progress bar ───────────────────────────────────────── */}
                 {reviewedCount > 0 && (
                     <div style={{ marginBottom: 16 }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
@@ -638,101 +826,124 @@ export default function QuestionnaireReviewPage() {
                             percent={reviewProgress}
                             showInfo={false}
                             strokeColor="#52c41a"
+                            trailColor="#f0f0f0"
                             size="small"
                         />
                     </div>
                 )}
 
-                {/* ── Questions table ───────────────────────────────────────────── */}
-                <Card
-                    title={
-                        <Space>
-                            <span>Questions</span>
-                            <Badge
-                                count={totalQ}
-                                showZero
-                                style={{ backgroundColor: '#1890ff' }}
-                                overflowCount={9999}
-                            />
-                        </Space>
-                    }
-                    extra={
-                        <Select
-                            value={statusFilter || 'ALL'}
-                            style={{ width: 150 }}
-                            size="small"
-                            onChange={(val) => {
-                                setStatusFilter(val === 'ALL' ? '' : val);
-                                setCurrentPage(0);
-                            }}
+                {/* ── Bulk action toolbar (appears when rows selected) ──────────── */}
+                {selectedIds.length > 0 && (
+                    <div style={{
+                        display: 'flex', alignItems: 'center', gap: 12,
+                        padding: '10px 16px', marginBottom: 12,
+                        background: '#e6f4ff', borderRadius: 6,
+                        border: '1px solid #91caff',
+                    }}>
+                        <Text strong style={{ fontSize: 13 }}>
+                            {selectedIds.length} question{selectedIds.length > 1 ? 's' : ''} selected
+                        </Text>
+                        <Button
+                            type="primary" size="small"
+                            icon={<CheckCircleOutlined />}
+                            onClick={handleBulkApprove}
                         >
-                            <Option value="ALL">All statuses</Option>
-                            <Option value="PENDING">Pending</Option>
-                            <Option value="GENERATED">AI Generated</Option>
-                            <Option value="APPROVED">Approved</Option>
-                            <Option value="EDITED">Edited</Option>
-                            <Option value="REJECTED">Rejected</Option>
-                        </Select>
-                    }
-                >
-                    <Table
-                        dataSource={questions}
-                        columns={columns}
-                        rowKey="id"
-                        loading={loadingQ}
-                        size="small"
-                        rowClassName={(record) => scoreToRowClass(record.retrievalScore)}
-                        pagination={{
-                            current:         currentPage + 1,
-                            pageSize:        pageSize,
-                            total:           totalQ,
-                            showSizeChanger: false,
-                            showTotal:       (total, range) =>
-                                `${range[0]}–${range[1]} of ${total} questions`,
-                            onChange: (antPage) => setCurrentPage(antPage - 1),
-                        }}
-                        locale={{
-                            emptyText: (
-                                <div style={{ padding: 40, textAlign: 'center' }}>
-                                    <RobotOutlined style={{ fontSize: 36, color: '#d9d9d9', marginBottom: 12 }} />
-                                    <p style={{ color: '#8c8c8c', marginBottom: statusFilter ? 0 : 16 }}>
-                                        {statusFilter
-                                            ? `No questions with status "${statusFilter}"`
-                                            : pendingCount > 0
-                                                ? 'Click "Generate Answers" to have AI answer all questions.'
-                                                : 'No questions found'}
-                                    </p>
-                                    {!statusFilter && pendingCount > 0 && canGenerate && (
-                                        <Button
-                                            type="primary"
-                                            icon={<ThunderboltOutlined />}
-                                            onClick={handleGenerate}
-                                        >
-                                            Generate Answers
-                                        </Button>
-                                    )}
-                                </div>
-                            ),
-                        }}
-                    />
-                </Card>
+                            Approve selected
+                        </Button>
+                        <Button size="small" onClick={() => setSelectedIds([])}>
+                            Clear selection
+                        </Button>
+                    </div>
+                )}
 
-                {/* ── Score legend ──────────────────────────────────────────────── */}
+                {/* ── Filter row ────────────────────────────────────────────────── */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
+                    <Space>
+                        <FilterOutlined style={{ color: '#8c8c8c' }} />
+                        <Select
+                            value={activeFilter}
+                            style={{ width: 230 }}
+                            size="small"
+                            onChange={(val) => { setActiveFilter(val); setCurrentPage(0); }}
+                        >
+                            {FILTER_OPTIONS.map((opt) => (
+                                <Option key={opt.value} value={opt.value}>{opt.label}</Option>
+                            ))}
+                        </Select>
+                        {activeFilter && (
+                            <Button size="small" type="link"
+                                    onClick={() => { setActiveFilter(''); setCurrentPage(0); }}>
+                                Clear filter
+                            </Button>
+                        )}
+                    </Space>
+                    <Text type="secondary" style={{ fontSize: 12, alignSelf: 'center' }}>
+                        Showing {questions.length} of {totalQ} questions
+                    </Text>
+                </div>
+
+                {/* ── Questions table ───────────────────────────────────────────── */}
+                <Table
+                    dataSource={questions}
+                    columns={columns}
+                    rowKey="id"
+                    loading={loadingQ}
+                    size="small"
+                    rowSelection={rowSelection}
+                    rowClassName={rowClassName}
+                    pagination={{
+                        current:         currentPage + 1,
+                        pageSize:        PAGE_SIZE,
+                        total:           totalQ,
+                        showSizeChanger: false,
+                        showTotal: (total, range) =>
+                            `${range[0]}–${range[1]} of ${total} questions`,
+                        onChange: (antPage) => {
+                            setCurrentPage(antPage - 1);
+                            window.scrollTo({ top: 0, behavior: 'smooth' });
+                        },
+                    }}
+                    locale={{
+                        emptyText: (
+                            <div style={{ padding: 48, textAlign: 'center' }}>
+                                <RobotOutlined style={{ fontSize: 36, color: '#d9d9d9', marginBottom: 12 }} />
+                                <p style={{ color: '#8c8c8c', marginBottom: pendingCount > 0 ? 16 : 0 }}>
+                                    {activeFilter
+                                        ? `No questions match "${FILTER_OPTIONS.find(f => f.value === activeFilter)?.label || activeFilter}"`
+                                        : pendingCount > 0
+                                            ? 'Click "Generate Answers" to have AI answer all questions.'
+                                            : 'No questions found'}
+                                </p>
+                                {!activeFilter && pendingCount > 0 && canGenerate && (
+                                    <Button type="primary" icon={<ThunderboltOutlined />}
+                                            onClick={handleGenerate}>
+                                        Generate Answers
+                                    </Button>
+                                )}
+                            </div>
+                        ),
+                    }}
+                />
+
+                {/* ── Confidence legend ─────────────────────────────────────────── */}
                 <div style={{
                     display: 'flex', gap: 20, marginTop: 12,
                     padding: '8px 16px', background: '#fafafa',
                     borderRadius: 6, border: '1px solid #f0f0f0',
+                    alignItems: 'center',
                 }}>
-                    <Text type="secondary" style={{ fontSize: 12 }}>Confidence:</Text>
+                    <Text type="secondary" style={{ fontSize: 12, fontWeight: 600 }}>
+                        Confidence score:
+                    </Text>
                     {[
-                        { color: '#52c41a', label: '≥ 80% — High' },
-                        { color: '#faad14', label: '50–79% — Review' },
-                        { color: '#ff4d4f', label: '< 50% — Low' },
+                        { color: BAND_COLORS.high.badge,   label: '≥ 80% — High' },
+                        { color: BAND_COLORS.medium.badge, label: '50–79% — Review' },
+                        { color: BAND_COLORS.low.badge,    label: '< 50% — Low'  },
                     ].map(({ color, label }) => (
-                        <Space key={label} size={4}>
+                        <Space key={label} size={6}>
                             <div style={{
                                 width: 10, height: 10, borderRadius: '50%',
-                                background: color, display: 'inline-block',
+                                background: color, flexShrink: 0,
                             }} />
                             <Text type="secondary" style={{ fontSize: 12 }}>{label}</Text>
                         </Space>
@@ -741,20 +952,20 @@ export default function QuestionnaireReviewPage() {
 
                 {/* ── Edit Modal ────────────────────────────────────────────────── */}
                 <EditModal
-                    question={editingQuestion}
-                    visible={editModalOpen}
+                    question={editTarget}
+                    open={editOpen}
                     onSave={handleSaveEdit}
-                    onCancel={() => { setEditModalOpen(false); setEditingQuestion(null); }}
+                    onCancel={() => { setEditOpen(false); setEditTarget(null); }}
                     saving={savingEdit}
                 />
             </div>
 
-            {/* ── Row color styles (injected inline for simplicity) ────────────── */}
+            {/* ── Row colour styles ─────────────────────────────────────────── */}
             <style>{`
-        .row-yellow td { background-color: #fffbe6 !important; }
-        .row-yellow:hover td { background-color: #fff1b8 !important; }
-        .row-red td { background-color: #fff2f0 !important; }
-        .row-red:hover td { background-color: #ffccc7 !important; }
+        .review-row-yellow td { background-color: #fffbe6 !important; }
+        .review-row-yellow:hover td { background-color: #fff1b8 !important; }
+        .review-row-red td { background-color: #fff2f0 !important; }
+        .review-row-red:hover td { background-color: #ffccc7 !important; }
       `}</style>
         </AppLayout>
     );

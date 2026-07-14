@@ -1,11 +1,8 @@
-// src/components/AppLayout.jsx  — REPLACE ENTIRE FILE (Phase 5 update)
-// Adds "Review Answers" in the Questionnaires section when on a review page.
+// src/components/AppLayout.jsx
 import { Layout, Menu, Button, Typography } from 'antd';
 import {
-    SafetyCertificateOutlined, FileTextOutlined,
-    UploadOutlined, LogoutOutlined,
-    FileExcelOutlined, PlusOutlined,
-    EyeOutlined,
+    SafetyCertificateOutlined, FileTextOutlined, UploadOutlined,
+    LogoutOutlined, FileExcelOutlined, PlusOutlined, EyeOutlined,
 } from '@ant-design/icons';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
@@ -21,22 +18,21 @@ export default function AppLayout({ children }) {
     const handleLogout = () => { logout(); navigate('/login'); };
 
     const selectedKey = (() => {
-        if (location.pathname === '/questionnaires/upload')            return 'q-upload';
-        if (location.pathname.endsWith('/review'))                     return 'q-review';
-        if (location.pathname.startsWith('/questionnaires'))           return 'questionnaires';
-        if (location.pathname === '/documents/upload')                 return 'doc-upload';
-        if (location.pathname.startsWith('/documents'))                return 'documents';
+        if (location.pathname === '/questionnaires/upload')  return 'q-upload';
+        if (location.pathname.endsWith('/review'))           return 'q-review';
+        if (location.pathname.startsWith('/questionnaires')) return 'questionnaires';
+        if (location.pathname === '/documents/upload')       return 'doc-upload';
+        if (location.pathname.startsWith('/documents'))      return 'documents';
         return 'dashboard';
     })();
 
-    // Extract questionnaire ID from /questionnaires/:id/review for the review link
+    // Pull questionnaire ID from review URL so we can link back to it
     const reviewMatch = location.pathname.match(/\/questionnaires\/([^/]+)\/review/);
     const reviewId    = reviewMatch?.[1] ?? null;
 
     return (
         <Layout style={{ minHeight: '100vh' }}>
             <Sider width={230} theme="dark">
-                {/* Logo */}
                 <div style={{ padding: '16px 20px', color: 'white', fontSize: 16 }}>
                     <SafetyCertificateOutlined style={{ fontSize: 18, marginRight: 8 }} />
                     <strong>SecAI</strong>
@@ -57,24 +53,12 @@ export default function AppLayout({ children }) {
                             style: { borderColor: 'rgba(255,255,255,0.1)', margin: '8px 0' },
                         },
                         {
-                            key: 'documents-group',
+                            key: 'docs-group',
                             type: 'group',
-                            label: (
-                                <Text style={{ color: 'rgba(255,255,255,0.45)', fontSize: 11 }}>
-                                    DOCUMENTS
-                                </Text>
-                            ),
+                            label: <Text style={{ color: 'rgba(255,255,255,0.45)', fontSize: 11 }}>DOCUMENTS</Text>,
                             children: [
-                                {
-                                    key: 'documents',
-                                    icon: <FileTextOutlined />,
-                                    label: <Link to="/documents">All Documents</Link>,
-                                },
-                                {
-                                    key: 'doc-upload',
-                                    icon: <UploadOutlined />,
-                                    label: <Link to="/documents/upload">Upload Doc</Link>,
-                                },
+                                { key: 'documents', icon: <FileTextOutlined />, label: <Link to="/documents">All Documents</Link> },
+                                { key: 'doc-upload', icon: <UploadOutlined />, label: <Link to="/documents/upload">Upload Doc</Link> },
                             ],
                         },
                         {
@@ -82,44 +66,23 @@ export default function AppLayout({ children }) {
                             style: { borderColor: 'rgba(255,255,255,0.1)', margin: '8px 0' },
                         },
                         {
-                            key: 'questionnaires-group',
+                            key: 'q-group',
                             type: 'group',
-                            label: (
-                                <Text style={{ color: 'rgba(255,255,255,0.45)', fontSize: 11 }}>
-                                    QUESTIONNAIRES
-                                </Text>
-                            ),
+                            label: <Text style={{ color: 'rgba(255,255,255,0.45)', fontSize: 11 }}>QUESTIONNAIRES</Text>,
                             children: [
-                                {
-                                    key: 'questionnaires',
-                                    icon: <FileExcelOutlined />,
-                                    label: <Link to="/questionnaires">All Questionnaires</Link>,
-                                },
-                                {
-                                    key: 'q-upload',
-                                    icon: <PlusOutlined />,
-                                    label: <Link to="/questionnaires/upload">Upload Questionnaire</Link>,
-                                },
-                                // Only show "Review Answers" when actively on a review page
+                                { key: 'questionnaires', icon: <FileExcelOutlined />, label: <Link to="/questionnaires">All Questionnaires</Link> },
+                                { key: 'q-upload', icon: <PlusOutlined />, label: <Link to="/questionnaires/upload">Upload Questionnaire</Link> },
                                 ...(reviewId ? [{
                                     key: 'q-review',
                                     icon: <EyeOutlined />,
-                                    label: (
-                                        <Link to={`/questionnaires/${reviewId}/review`}>
-                                            Review Answers
-                                        </Link>
-                                    ),
+                                    label: <Link to={`/questionnaires/${reviewId}/review`}>Review Answers</Link>,
                                 }] : []),
                             ],
                         },
                     ]}
                 />
 
-                {/* Sign out */}
-                <div style={{
-                    position: 'absolute', bottom: 16,
-                    left: 0, right: 0, padding: '0 12px',
-                }}>
+                <div style={{ position: 'absolute', bottom: 16, left: 0, right: 0, padding: '0 12px' }}>
                     <Button
                         type="text"
                         icon={<LogoutOutlined />}

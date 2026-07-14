@@ -1,11 +1,10 @@
-// src/api/questionnaires.js  — REPLACE ENTIRE FILE (Phase 5 update)
+// src/api/questionnaires.js
 import client from './client';
 
-/** Upload and parse a questionnaire file (XLSX, CSV, DOCX). */
 export const uploadQuestionnaire = (file, onProgress) => {
-    const formData = new FormData();
-    formData.append('file', file);
-    return client.post('/questionnaires', formData, {
+    const fd = new FormData();
+    fd.append('file', file);
+    return client.post('/questionnaires', fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
         onUploadProgress: (e) => {
             if (onProgress) onProgress(Math.round((e.loaded * 100) / e.total));
@@ -13,60 +12,35 @@ export const uploadQuestionnaire = (file, onProgress) => {
     });
 };
 
-/** List all questionnaires for the authenticated org. */
-export const listQuestionnaires = () => client.get('/questionnaires');
+export const listQuestionnaires = ()     => client.get('/questionnaires');
+export const getQuestionnaire   = (id)  => client.get(`/questionnaires/${id}`);
+export const deleteQuestionnaire= (id)  => client.delete(`/questionnaires/${id}`);
 
-/** Get questionnaire detail with status counts and AI job summary. */
-export const getQuestionnaire = (id) => client.get(`/questionnaires/${id}`);
-
-/**
- * Get paginated questions for a questionnaire.
- * Returns a Spring Page object: { content, totalElements, totalPages, ... }
- */
-export const getQuestions = (id, { status = '', page = 0, size = 50 } = {}) =>
+export const getQuestions = (id, { status = '', filter = '', page = 0, size = 50 } = {}) =>
     client.get(`/questionnaires/${id}/questions`, {
-        params: { status: status || undefined, page, size },
+        params: {
+            filter: filter  || undefined,
+            status: status  || undefined,
+            page,
+            size,
+        },
     });
 
-/** Delete a questionnaire and all its questions. */
-export const deleteQuestionnaire = (id) => client.delete(`/questionnaires/${id}`);
-
-// ── Phase 5 additions ─────────────────────────────────────────────────────────
-
-/**
- * POST /api/questionnaires/{id}/generate
- * Triggers AI answer generation. Returns immediately with job status.
- * The job runs asynchronously — poll getGenerationJob() for progress.
- */
-export const startGeneration = (id) => client.post(`/questionnaires/${id}/generate`);
-
-/**
- * GET /api/questionnaires/{id}/job
- * Lightweight polling endpoint.
- * Returns: { jobId, questionnaireId, status, totalQuestions,
- *            completedQuestions, progressPercent, statusMessage,
- *            startedAt, finishedAt }
- */
+// Phase 5 – generation
+export const startGeneration  = (id) => client.post(`/questionnaires/${id}/generate`);
 export const getGenerationJob = (id) => client.get(`/questionnaires/${id}/job`);
 
-/**
- * PUT /api/questions/{id}
- * Edit an AI-generated answer. Sets status → EDITED.
- * Body: { manualAnswer: "..." }
- */
-export const editQuestion = (questionId, manualAnswer) =>
-    client.put(`/questions/${questionId}`, { manualAnswer });
+// Phase 6 – review
+export const editQuestion    = (qid, manualAnswer) =>
+    client.put(`/questions/${qid}`, { manualAnswer });
+export const approveQuestion = (qid) => client.post(`/questions/${qid}/approve`);
+export const rejectQuestion  = (qid) => client.post(`/questions/${qid}/reject`);
 
-/**
- * POST /api/questions/{id}/approve
- * Approve the current answer. Sets status → APPROVED.
- */
-export const approveQuestion = (questionId) =>
-    client.post(`/questions/${questionId}/approve`);
+export const bulkApprove = (questionnaireId, questionIds) =>
+    client.post(`/questionnaires/${questionnaireId}/questions/bulk-approve`, { questionIds });
 
-/**
- * POST /api/questions/{id}/reject
- * Reject the AI answer. Sets status → REJECTED.
- */
-export const rejectQuestion = (questionId) =>
-    client.post(`/questions/${questionId}/reject`);
+// Phase 7 – export
+// Returns a blob URL the browser can download.
+// Usage: const url = await getExportUrl(id); window.location.href = url;
+export const exportQuestionnaire = (id) =>
+    client.get(`/questionnaires/${id}/export`, { responseType: 'blob' });

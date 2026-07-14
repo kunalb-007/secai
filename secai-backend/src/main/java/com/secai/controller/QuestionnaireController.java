@@ -2,37 +2,28 @@ package com.secai.controller;
 
 import com.secai.config.TenantContext;
 import com.secai.domain.questionnaire.AiGenerationJob;
+import com.secai.domain.questionnaire.AiGenerationJobRepository;
 import com.secai.dto.questionnaire.*;
 import com.secai.exception.NotFoundException;
-import com.secai.service.AnswerGenerationService;
-import com.secai.service.QuestionnaireService;
-import com.secai.service.QuestionReviewService;
+import com.secai.service.*;
+import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.data.domain.Page;
 import org.springframework.http.*;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.IOException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
 
 /**
- * Phase 5 REPLACEMENT for QuestionnaireController.
+ * Phase 6 & 7 replacement for QuestionnaireController.
  *
- * New endpoints added vs Phase 4:
- *
- *   POST   /api/questionnaires/{id}/generate          ← trigger AI generation
- *   GET    /api/questionnaires/{id}/job               ← poll progress
- *
- *   PUT    /api/questions/{id}                        ← edit an answer
- *   POST   /api/questions/{id}/approve                ← approve an answer
- *   POST   /api/questions/{id}/reject                 ← reject an answer
- *
- * Note: the /api/questions/* endpoints are intentionally on a SEPARATE path
- * (/api/questions instead of /api/questionnaires/{id}/questions/{qid}) to keep
- * the review operations simple — question ID alone is sufficient since we
- * verify org ownership in the service layer via TenantContext.
- *
- * REPLACE the existing QuestionnaireController.java with this file.
+ * New vs Phase 5:
+ *   POST /api/questionnaires/{id}/questions/bulk-approve  ← Phase 6 bulk action
+ *   GET  /api/questionnaires/{id}/export                  ← Phase 7 Excel export
  */
 @RestController
 public class QuestionnaireController {
@@ -40,97 +31,70 @@ public class QuestionnaireController {
     private final QuestionnaireService    questionnaireService;
     private final AnswerGenerationService generationService;
     private final QuestionReviewService   reviewService;
-
-    // Injected for job polling (lightweight — avoids loading the full service)
-    private final com.secai.domain.questionnaire.AiGenerationJobRepository jobRepo;
+    private final ExportService           exportService;
+    private final AiGenerationJobRepository jobRepo;
 
     public QuestionnaireController(
             QuestionnaireService    questionnaireService,
             AnswerGenerationService generationService,
             QuestionReviewService   reviewService,
-            com.secai.domain.questionnaire.AiGenerationJobRepository jobRepo
+            ExportService           exportService,
+            AiGenerationJobRepository jobRepo
     ) {
         this.questionnaireService = questionnaireService;
         this.generationService    = generationService;
         this.reviewService        = reviewService;
+        this.exportService        = exportService;
         this.jobRepo              = jobRepo;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // QUESTIONNAIRE ENDPOINTS (unchanged from Phase 4 + new Phase 5 ones)
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ── Questionnaire CRUD ────────────────────────────────────────────────────
 
-    /**
-     * POST /api/questionnaires
-     * Upload and parse a questionnaire file (XLSX, CSV, DOCX).
-     */
     @PostMapping(value = "/api/questionnaires", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<QuestionnaireUploadResponse> upload(
             @RequestParam("file") MultipartFile file
     ) {
-        return ResponseEntity
-                .status(HttpStatus.CREATED)
+        return ResponseEntity.status(HttpStatus.CREATED)
                 .body(questionnaireService.uploadAndParse(file));
     }
 
-    /**
-     * GET /api/questionnaires
-     * List all questionnaires for the authenticated org.
-     */
     @GetMapping("/api/questionnaires")
     public ResponseEntity<List<QuestionnaireListResponse>> list() {
         return ResponseEntity.ok(questionnaireService.listForCurrentOrg());
     }
 
-    /**
-     * GET /api/questionnaires/{id}
-     * Questionnaire detail including status counts and AI job summary.
-     */
     @GetMapping("/api/questionnaires/{id}")
-    public ResponseEntity<QuestionnaireDetailResponse> getDetail(
-            @PathVariable UUID id
-    ) {
+    public ResponseEntity<QuestionnaireDetailResponse> getDetail(@PathVariable UUID id) {
         return ResponseEntity.ok(questionnaireService.getDetail(id));
     }
 
-    /**
-     * GET /api/questionnaires/{id}/questions?status=PENDING&page=0&size=50
-     * Paginated question list. Optional status filter.
-     */
     @GetMapping("/api/questionnaires/{id}/questions")
     public ResponseEntity<Page<QuestionResponse>> getQuestions(
             @PathVariable UUID id,
             @RequestParam(required = false)    String status,
+            @RequestParam(required = false)    String filter,   // alias for status (Phase 6 spec)
             @RequestParam(defaultValue = "0")  int    page,
             @RequestParam(defaultValue = "50") int    size
     ) {
-        int cappedSize = Math.min(size, 100);
-        return ResponseEntity.ok(questionnaireService.getQuestions(id, status, page, cappedSize));
+        // Accept both ?status= and ?filter= — Phase 6 spec uses "filter"
+        String effectiveFilter = (status != null && !status.isBlank()) ? status
+                : (filter != null && !filter.isBlank()) ? normaliseFilter(filter)
+                  : null;
+
+        int capped = Math.min(size, 200);
+        return ResponseEntity.ok(
+                questionnaireService.getQuestions(id, effectiveFilter, page, capped)
+        );
     }
 
-    /**
-     * DELETE /api/questionnaires/{id}
-     */
     @DeleteMapping("/api/questionnaires/{id}")
     public ResponseEntity<Void> delete(@PathVariable UUID id) {
         questionnaireService.delete(id);
         return ResponseEntity.noContent().build();
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // PHASE 5 — AI GENERATION ENDPOINTS
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ── AI generation ─────────────────────────────────────────────────────────
 
-    /**
-     * POST /api/questionnaires/{id}/generate
-     *
-     * Triggers AI answer generation for all PENDING questions in the questionnaire.
-     * Returns immediately with the current job state (async work runs in background).
-     *
-     * Idempotent: calling again while RUNNING returns the current job without
-     * restarting. Calling again after COMPLETED also returns the existing job.
-     * To re-run, the frontend must offer a "Re-generate" flow (not in Phase 5 scope).
-     */
     @PostMapping("/api/questionnaires/{id}/generate")
     public ResponseEntity<GenerationJobResponse> generate(@PathVariable UUID id) {
         UUID orgId = TenantContext.get();
@@ -138,16 +102,6 @@ public class QuestionnaireController {
         return ResponseEntity.ok(GenerationJobResponse.from(job));
     }
 
-    /**
-     * GET /api/questionnaires/{id}/job
-     *
-     * Lightweight polling endpoint — returns just the AI job status + progress.
-     * Frontend polls this every 2 seconds while status is RUNNING.
-     *
-     * Returns 404 if no job exists yet (questionnaire was just uploaded but
-     * generation has never been triggered — this should not normally happen
-     * since we create the job record on questionnaire upload in Phase 4).
-     */
     @GetMapping("/api/questionnaires/{id}/job")
     public ResponseEntity<GenerationJobResponse> getJob(@PathVariable UUID id) {
         AiGenerationJob job = jobRepo.findByQuestionnaireId(id)
@@ -155,15 +109,43 @@ public class QuestionnaireController {
         return ResponseEntity.ok(GenerationJobResponse.from(job));
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // PHASE 5 — QUESTION REVIEW ENDPOINTS
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ── Phase 7: Export ───────────────────────────────────────────────────────
 
     /**
-     * PUT /api/questions/{id}
-     * Edit an AI-generated answer. Sets status → EDITED.
-     * Body: { "manualAnswer": "..." }
+     * GET /api/questionnaires/{id}/export
+     *
+     * Streams an .xlsx file to the browser.
+     * Content-Disposition: attachment triggers a download in every browser.
+     * Filename is derived from the questionnaire's original filename.
      */
+    @GetMapping("/api/questionnaires/{id}/export")
+    public void export(
+            @PathVariable UUID id,
+            HttpServletResponse response
+    ) throws IOException {
+        byte[] xlsx = exportService.export(id);
+
+        // Build a safe filename: "answers_<original_name>.xlsx"
+        String detail = questionnaireService.getDetail(id).filename();
+        String safeName = "answers_" + detail.replaceAll("[^a-zA-Z0-9._\\-]", "_");
+        if (!safeName.toLowerCase().endsWith(".xlsx")) {
+            safeName = safeName.replaceAll("\\.[^.]+$", "") + ".xlsx";
+        }
+
+        response.setContentType(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        );
+        response.setHeader(
+                HttpHeaders.CONTENT_DISPOSITION,
+                "attachment; filename=\"" + safeName + "\"; filename*=UTF-8''"
+                        + URLEncoder.encode(safeName, StandardCharsets.UTF_8)
+        );
+        response.setContentLength(xlsx.length);
+        response.getOutputStream().write(xlsx);
+    }
+
+    // ── Phase 6: Single-question review ──────────────────────────────────────
+
     @PutMapping("/api/questions/{id}")
     public ResponseEntity<QuestionResponse> editAnswer(
             @PathVariable UUID id,
@@ -172,21 +154,57 @@ public class QuestionnaireController {
         return ResponseEntity.ok(reviewService.editAnswer(id, req));
     }
 
-    /**
-     * POST /api/questions/{id}/approve
-     * Approve the current answer (AI or edited). Sets status → APPROVED.
-     */
     @PostMapping("/api/questions/{id}/approve")
     public ResponseEntity<QuestionResponse> approve(@PathVariable UUID id) {
         return ResponseEntity.ok(reviewService.approve(id));
     }
 
-    /**
-     * POST /api/questions/{id}/reject
-     * Reject the AI answer. Sets status → REJECTED.
-     */
     @PostMapping("/api/questions/{id}/reject")
     public ResponseEntity<QuestionResponse> reject(@PathVariable UUID id) {
         return ResponseEntity.ok(reviewService.reject(id));
+    }
+
+    // ── Phase 6: Bulk approve ─────────────────────────────────────────────────
+
+    /**
+     * POST /api/questionnaires/{id}/questions/bulk-approve
+     * Body: { "questionIds": ["uuid1", "uuid2", ...] }
+     * Returns: { "approved": 42 }
+     */
+    @PostMapping("/api/questionnaires/{id}/questions/bulk-approve")
+    public ResponseEntity<BulkApproveResponse> bulkApprove(
+            @PathVariable UUID id,
+            @RequestBody  BulkApproveRequest req
+    ) {
+        int count = reviewService.bulkApprove(req.questionIds());
+        return ResponseEntity.ok(new BulkApproveResponse(count));
+    }
+
+    // ── Inner DTOs for bulk approve (small enough to stay inline) ────────────
+
+    public record BulkApproveRequest(List<UUID> questionIds) {}
+    public record BulkApproveResponse(int approved) {}
+
+    // ── Filter name normaliser ────────────────────────────────────────────────
+
+    /**
+     * Maps friendly filter names used in the UI to QuestionStatus enum values.
+     *   "low_confidence" → "GENERATED"  (we can't filter by score server-side yet;
+     *                                    the low-conf filter is client-side)
+     *   "pending"        → "PENDING"
+     *   "approved"       → "APPROVED"
+     *   "edited"         → "EDITED"
+     *   "rejected"       → "REJECTED"
+     */
+    private String normaliseFilter(String filter) {
+        return switch (filter.toLowerCase()) {
+            case "pending"        -> "PENDING";
+            case "approved"       -> "APPROVED";
+            case "edited"         -> "EDITED";
+            case "rejected"       -> "REJECTED";
+            case "generated"      -> "GENERATED";
+            case "low_confidence" -> "GENERATED";  // client handles score filter
+            default               -> filter.toUpperCase();
+        };
     }
 }

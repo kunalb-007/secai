@@ -9,17 +9,20 @@ import com.secai.exception.NotFoundException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
 import java.util.UUID;
 
 /**
- * Phase 5 — Human review operations on individual questions.
+ * Phase 6 — Human review: edit, approve, reject, bulk-approve.
  *
- * Supports:
- *   - Editing an AI answer (saves as EDITED, preserves ai_answer for reference)
- *   - Approving an answer   (status → APPROVED)
- *   - Rejecting an answer   (status → REJECTED, clears manual_answer)
- *
- * Every operation validates org ownership via TenantContext before mutating.
+ * Every mutating method validates org ownership via TenantContext before acting.
+ * Individual question status transitions:
+ *   GENERATED → EDITED    (edit)
+ *   GENERATED → APPROVED  (approve)
+ *   GENERATED → REJECTED  (reject)
+ *   EDITED    → APPROVED  (approve after edit)
+ *   EDITED    → REJECTED  (reject)
+ *   REJECTED  → EDITED    (re-edit a rejection)
  */
 @Service
 public class QuestionReviewService {
@@ -35,82 +38,80 @@ public class QuestionReviewService {
         this.questionnaireRepo = questionnaireRepo;
     }
 
-    // ── Edit ──────────────────────────────────────────────────────────────────
+    // ── Single-question actions ────────────────────────────────────────────────
 
-    /**
-     * PUT /api/questions/{id}
-     * Saves a manual answer. Sets status → EDITED.
-     * The original ai_answer is preserved for audit purposes.
-     */
     @Transactional
     public QuestionResponse editAnswer(UUID questionId, QuestionAnswerUpdateRequest req) {
         Question question = loadAndVerify(questionId);
 
         if (req.manualAnswer() == null || req.manualAnswer().isBlank()) {
-            throw new IllegalArgumentException("Manual answer cannot be blank.");
+            throw new IllegalArgumentException("Answer cannot be blank.");
         }
 
         question.setManualAnswer(req.manualAnswer().trim());
         question.setStatus(QuestionStatus.EDITED);
         questionRepo.save(question);
-
         return toResponse(question);
     }
 
-    // ── Approve ───────────────────────────────────────────────────────────────
-
-    /**
-     * POST /api/questions/{id}/approve
-     * Approves the current answer (AI or edited). Sets status → APPROVED.
-     */
     @Transactional
     public QuestionResponse approve(UUID questionId) {
         Question question = loadAndVerify(questionId);
 
-        // Can only approve GENERATED or EDITED questions
-        if (question.getStatus() != QuestionStatus.GENERATED
-                && question.getStatus() != QuestionStatus.EDITED) {
-            throw new IllegalStateException(
-                    "Only generated or edited answers can be approved."
-            );
+        if (question.getStatus() == QuestionStatus.PENDING) {
+            throw new IllegalStateException("Cannot approve a question that has no AI answer yet.");
         }
-
         question.setStatus(QuestionStatus.APPROVED);
         questionRepo.save(question);
-
         return toResponse(question);
     }
 
-    // ── Reject ────────────────────────────────────────────────────────────────
-
-    /**
-     * POST /api/questions/{id}/reject
-     * Rejects the AI answer. Sets status → REJECTED.
-     * Manual answer is cleared so it won't appear in the export.
-     */
     @Transactional
     public QuestionResponse reject(UUID questionId) {
         Question question = loadAndVerify(questionId);
 
-        if (question.getStatus() == QuestionStatus.PENDING) {
-            throw new IllegalStateException(
-                    "Cannot reject a question that has not been answered by AI yet."
-            );
-        }
-
         question.setStatus(QuestionStatus.REJECTED);
         question.setManualAnswer(null);
         questionRepo.save(question);
-
         return toResponse(question);
+    }
+
+    // ── Bulk actions ──────────────────────────────────────────────────────────
+
+    /**
+     * Bulk-approve a list of question IDs in a single transaction.
+     * Only GENERATED or EDITED questions are approved; others are silently skipped.
+     * All IDs must belong to the current org — any mismatch throws ForbiddenException.
+     *
+     * @return count of questions actually approved
+     */
+    @Transactional
+    public int bulkApprove(List<UUID> questionIds) {
+        UUID orgId = TenantContext.get();
+        int approved = 0;
+
+        for (UUID id : questionIds) {
+            Question q = questionRepo.findById(id)
+                    .orElseThrow(() -> new NotFoundException("Question not found: " + id));
+
+            if (!orgId.equals(q.getOrganizationId())) {
+                throw new ForbiddenException("Access denied to question: " + id);
+            }
+
+            // Only approve answerable statuses — skip PENDING / already APPROVED
+            if (q.getStatus() == QuestionStatus.GENERATED
+                    || q.getStatus() == QuestionStatus.EDITED) {
+                q.setStatus(QuestionStatus.APPROVED);
+                questionRepo.save(q);
+                approved++;
+            }
+        }
+
+        return approved;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /**
-     * Loads a question and verifies it belongs to the current org.
-     * Throws NotFoundException or ForbiddenException appropriately.
-     */
     private Question loadAndVerify(UUID questionId) {
         UUID orgId = TenantContext.get();
         Question question = questionRepo.findById(questionId)
@@ -119,7 +120,6 @@ public class QuestionReviewService {
         if (!orgId.equals(question.getOrganizationId())) {
             throw new ForbiddenException("Access denied to this question");
         }
-
         return question;
     }
 
