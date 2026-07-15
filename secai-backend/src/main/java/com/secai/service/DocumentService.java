@@ -11,6 +11,7 @@ import com.secai.dto.document.DocumentUploadResponse;
 import com.secai.exception.ForbiddenException;
 import com.secai.exception.NotFoundException;
 import com.secai.processing.DocumentProcessingWorker;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -18,6 +19,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
+@Slf4j
 @Service
 public class DocumentService {
 
@@ -57,6 +59,9 @@ public class DocumentService {
     public DocumentUploadResponse upload(MultipartFile file) {
         UUID orgId = TenantContext.get();
 
+        log.info("Document upload received: {}",
+                file.getOriginalFilename());
+
         // --- Validation ---
         validateFile(file);
 
@@ -70,14 +75,24 @@ public class DocumentService {
                         .build()
         );
 
+        log.info("Created document {} with status {}",
+                doc.getId(),
+                doc.getStatus());
+
         // --- Upload to S3 ---
         try {
             String storagePath = storageService.upload(file, orgId.toString(), doc.getId().toString());
             doc.setStoragePath(storagePath);
             documentRepository.save(doc);
 
+            log.info("Document {} stored successfully",
+                    doc.getId());
+
             // ── PHASE 3 ADDITION: Trigger async processing ──────────────────────
             processingWorker.processAsync(doc.getId());
+
+            log.info("Starting asynchronous processing for document {}",
+                    doc.getId());
             // ────────────────────────────────────────────────────────────────────
 
         } catch (Exception e) {
@@ -86,6 +101,9 @@ public class DocumentService {
             documentRepository.save(doc);
             throw new RuntimeException("File storage failed. Please try again.", e);
         }
+
+        log.info("Document upload completed: {}",
+                doc.getId());
 
         return new DocumentUploadResponse(
                 doc.getId(),
@@ -143,6 +161,9 @@ public class DocumentService {
             storageService.delete(doc.getStoragePath());
         }
         documentRepository.delete(doc);
+
+        log.info("Deleted document {}",
+                documentId);
     }
 
     // ---- Private helpers ----

@@ -57,12 +57,11 @@ public class DocxParser implements QuestionnaireParser {
 
                 String style = para.getStyle();
 
-                // Heading paragraphs → update category, don't treat as questions
-                if (style != null && (style.startsWith("Heading") || style.equals("Title"))) {
+                // (handles "Heading 1", "Heading1", "heading1", "1", "Title"):
+                if (isHeadingStyle(style)) {
                     currentCategory = text;
                     continue;
                 }
-
                 totalLinesAttempted++;
 
                 // Try numbered question pattern
@@ -164,5 +163,11 @@ public class DocxParser implements QuestionnaireParser {
     /** True if the paragraph is part of a Word numbered/bulleted list. */
     private boolean isWordListParagraph(XWPFParagraph para) {
         return para.getNumID() != null;
+    }
+
+    private boolean isHeadingStyle(String style) {
+        if (style == null) return false;
+        String s = style.toLowerCase().replace(" ", "");
+        return s.startsWith("heading") || s.equals("title") || s.equals("subtitle");
     }
 }

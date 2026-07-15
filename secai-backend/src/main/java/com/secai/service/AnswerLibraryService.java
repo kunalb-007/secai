@@ -7,6 +7,7 @@ import com.secai.domain.questionnaire.Question;
 import com.secai.domain.questionnaire.QuestionRepository;
 import com.secai.domain.questionnaire.QuestionStatus;
 import com.secai.dto.library.ApprovedAnswerMatch;
+import com.secai.exception.ForbiddenException;
 import com.secai.exception.NotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -93,6 +94,8 @@ public class AnswerLibraryService {
             float[] embedding      = embeddingService.embed(q.getQuestionText());
             String  embeddingStr   = embeddingService.toVectorString(embedding);
 
+            log.info("[library] Question embedding generated");
+
             // Upsert: if this question was already indexed (re-approve), update it
             Optional<ApprovedAnswer> existing =
                     libraryRepo.findBySourceQuestionId(questionId);
@@ -105,7 +108,8 @@ public class AnswerLibraryService {
                 entry.setApprovedAt(OffsetDateTime.now());
                 entry.setQuestionEmbedding(embedding);
                 libraryRepo.save(entry);
-                log.debug("[library] Updated entry for question {}", questionId);
+                log.info("[library] Updated existing library entry for question {}",
+                        questionId);
             } else {
                 libraryRepo.save(
                         ApprovedAnswer.builder()
@@ -119,7 +123,8 @@ public class AnswerLibraryService {
                                 .questionEmbedding(embedding)
                                 .build()
                 );
-                log.debug("[library] Indexed new entry for question {}", questionId);
+                log.info("[library] Added new approved answer to library for question {}",
+                        questionId);
             }
 
         } catch (Exception e) {
@@ -146,6 +151,9 @@ public class AnswerLibraryService {
         // Don't suggest library matches for questions that are already approved
         if (question.getStatus() == QuestionStatus.APPROVED
                 || question.getStatus() == QuestionStatus.EDITED) {
+            log.info("[library] No reusable answer found for question {}",
+                    questionId);
+
             return Optional.empty();
         }
 
@@ -169,8 +177,9 @@ public class AnswerLibraryService {
         Object[] row   = rows.get(0);
         ApprovedAnswer match = mapRow(row);
 
-        log.debug("[library] Found match for question {} — similarity {:.0f}%",
-                questionId, match.getSimilarity() * 100);
+        log.info("[library] Found reusable answer for question {} with similarity ({}%)",
+                questionId,
+                match.getSimilarity() * 100);
 
         return Optional.of(ApprovedAnswerMatch.from(match));
     }
@@ -193,14 +202,14 @@ public class AnswerLibraryService {
                 .orElseThrow(() -> new NotFoundException("Question not found"));
 
         if (!orgId.equals(question.getOrganizationId())) {
-            throw new com.secai.exception.ForbiddenException("Access denied");
+            throw new ForbiddenException("Access denied");
         }
 
         ApprovedAnswer library = libraryRepo.findById(libraryEntryId)
                 .orElseThrow(() -> new NotFoundException("Library entry not found"));
 
         if (!orgId.equals(library.getOrganizationId())) {
-            throw new com.secai.exception.ForbiddenException("Access denied to library entry");
+            throw new ForbiddenException("Access denied to library entry");
         }
 
         // Apply the library answer

@@ -52,7 +52,7 @@ app:
   openai:
     # GitHub Models free tier: set GITHUB_TOKEN env var
     # Switch to OpenAI: change to ${OPENAI_API_KEY} and update base-url
-    api-key: ${GITHUB_TOKEN:}
+    api-key: ${GITHUB_TOKEN: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}
     embedding-model: text-embedding-3-small
     embedding-dimensions: 1536
     base-url: ${AI_BASE_URL:https://models.inference.ai.azure.com}
@@ -72,3 +72,9 @@ logging:
   level:
     com.secai: DEBUG
     org.springframework.security: INFO
+#    org:
+#      hibernate:
+#        sql: DEBUG
+#        orm:
+#          jdbc:
+#            bind: TRACE

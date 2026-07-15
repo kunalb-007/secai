@@ -2,6 +2,7 @@ package com.secai.processing.extractor;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.pdfbox.pdmodel.PDDocument;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -13,6 +14,8 @@ import java.net.http.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+
+import static org.apache.pdfbox.Loader.loadPDF;
 
 @Component
 public class PdfTextExtractor implements TextExtractor {
@@ -46,56 +49,50 @@ public class PdfTextExtractor implements TextExtractor {
             throw new TextExtractionException("PDF file not found: " + filePath);
         }
 
+        // ------------------------------------------------------------------
+        // FAST PATH
+        // Try Apache PDFBox first.
+        // ------------------------------------------------------------------
+
         try {
-            byte[] fileBytes = Files.readAllBytes(path);
-            String fileName = path.getFileName().toString();
+            String pdfBoxText = extractWithPdfBox(path);
 
-            // Build multipart form body manually
-            String boundary = "----SecAIBoundary" + System.currentTimeMillis();
-            byte[] multipartBody = buildMultipartBody(boundary, fileName, fileBytes);
+            if (pdfBoxText != null) {
 
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(markerServiceUrl + "/convert"))
-                    .header("Content-Type", "multipart/form-data; boundary=" + boundary)
-                    .timeout(Duration.ofMinutes(5))   // large PDFs can take a while
-                    .POST(HttpRequest.BodyPublishers.ofByteArray(multipartBody))
-                    .build();
+                String cleaned = pdfBoxText.trim();
 
-            log.info("Sending PDF to Marker service: {}", fileName);
-            HttpResponse<String> response = httpClient.send(request,
-                    HttpResponse.BodyHandlers.ofString());
+                // Digital PDFs normally contain thousands of characters.
+                // If we extracted enough text, skip expensive OCR.
+                if (cleaned.length() > 200) {
 
-            if (response.statusCode() != 200) {
-                throw new TextExtractionException(
-                        "Marker service returned HTTP " + response.statusCode()
-                                + " for file: " + fileName
+                    log.info(
+                            "PDFBox extracted {} chars. Using PDFBox output.",
+                            cleaned.length()
+                    );
+
+                    return cleaned;
+                }
+
+                log.info(
+                        "PDFBox extracted only {} chars. Falling back to Marker OCR.",
+                        cleaned.length()
                 );
             }
 
-            // Marker returns: { "markdown": "# Title\n\nContent...", "pages": 12 }
-            JsonNode json = objectMapper.readTree(response.body());
-            String markdown = json.path("markdown").asText("");
-
-            if (markdown.isBlank()) {
-                throw new TextExtractionException(
-                        "Marker returned empty text for file: " + fileName
-                                + ". The PDF may be scanned/image-only or password-protected."
-                );
-            }
-
-            log.info("Marker extracted {} chars from {}", markdown.length(), fileName);
-            return markdown;
-
-        } catch (TextExtractionException e) {
-            throw e;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new TextExtractionException("PDF extraction interrupted", e);
         } catch (Exception e) {
-            throw new TextExtractionException(
-                    "PDF extraction failed: " + e.getMessage(), e
+
+            log.warn(
+                    "PDFBox extraction failed. Falling back to Marker. {}",
+                    e.getMessage()
             );
         }
+
+        // ------------------------------------------------------------------
+        // FALLBACK
+        // Marker OCR
+        // ------------------------------------------------------------------
+
+        return extractWithMarker(path);
     }
 
     /**
@@ -120,5 +117,92 @@ public class PdfTextExtractor implements TextExtractor {
         out.write(closing.getBytes());
 
         return out.toByteArray();
+    }
+
+    private String extractWithPdfBox(Path path) throws IOException {
+
+        try (PDDocument document =
+                     loadPDF(path.toFile())) {
+
+            org.apache.pdfbox.text.PDFTextStripper stripper =
+                    new org.apache.pdfbox.text.PDFTextStripper();
+
+            stripper.setSortByPosition(true);
+
+            return stripper.getText(document);
+        }
+    }
+
+    private String extractWithMarker(Path path) throws TextExtractionException {
+
+        // First check if Marker is reachable — fail fast rather than blocking 15 min
+        if (!isMarkerAvailable()) {
+            throw new TextExtractionException(
+                    "Marker OCR service is not available. " +
+                            "This PDF may be image-only and cannot be processed without Marker."
+            );
+        }
+
+        try {
+            byte[] fileBytes = Files.readAllBytes(path);
+            String fileName  = path.getFileName().toString();
+            String boundary  = "----SecAIBoundary" + System.currentTimeMillis();
+            byte[] multipartBody = buildMultipartBody(boundary, fileName, fileBytes);
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(markerServiceUrl + "/convert"))
+                    .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+                    .timeout(Duration.ofMinutes(5))   // reduced from 15 — fail faster for demo
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(multipartBody))
+                    .build();
+
+            log.info("Sending PDF to Marker OCR: {}", fileName);
+
+            HttpResponse<String> response = httpClient.send(
+                    request, HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() != 200) {
+                throw new TextExtractionException(
+                        "Marker service returned HTTP " + response.statusCode());
+            }
+
+            JsonNode json = objectMapper.readTree(response.body());
+            String markdown = json.path("markdown").asText("");
+
+            if (markdown.isBlank()) {
+                throw new TextExtractionException("Marker returned empty text.");
+            }
+
+            log.info("Marker extracted {} chars", markdown.length());
+            return markdown;
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new TextExtractionException("Marker OCR interrupted", e);
+        } catch (TextExtractionException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new TextExtractionException("Marker OCR failed: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Quick availability check — 3 second timeout.
+     * Prevents thread-pool starvation when Marker isn't running.
+     */
+    private boolean isMarkerAvailable() {
+        try {
+            HttpRequest ping = HttpRequest.newBuilder()
+                    .uri(URI.create(markerServiceUrl + "/health"))
+                    .timeout(Duration.ofSeconds(3))
+                    .GET()
+                    .build();
+            HttpResponse<Void> resp = httpClient.send(
+                    ping, HttpResponse.BodyHandlers.discarding());
+            return resp.statusCode() < 500;
+        } catch (Exception e) {
+            log.warn("Marker service not reachable: {}", e.getMessage());
+            return false;
+        }
     }
 }

@@ -6,12 +6,14 @@ import com.secai.dto.questionnaire.QuestionAnswerUpdateRequest;
 import com.secai.dto.questionnaire.QuestionResponse;
 import com.secai.exception.ForbiddenException;
 import com.secai.exception.NotFoundException;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.UUID;
 
+@Slf4j
 @Service
 public class QuestionReviewService {
 
@@ -41,6 +43,10 @@ public class QuestionReviewService {
         question.setManualAnswer(req.manualAnswer().trim());
         question.setStatus(QuestionStatus.EDITED);
         questionRepo.save(question);
+
+        log.info("Reviewer edited answer for question {}",
+                questionId);
+
         return toResponse(question);
     }
 
@@ -56,6 +62,12 @@ public class QuestionReviewService {
         }
         question.setStatus(QuestionStatus.APPROVED);
         questionRepo.save(question);
+
+        log.info("Question {} approved",
+                questionId);
+
+        log.info("Submitting approved answer for library indexing: {}",
+                questionId);
 
         // ── NEW: index in library (async — never blocks the HTTP response) ──
         String approverEmail = TenantContext.getEmail();     // see TenantContext update below
@@ -74,6 +86,10 @@ public class QuestionReviewService {
         question.setStatus(QuestionStatus.REJECTED);
         question.setManualAnswer(null);
         questionRepo.save(question);
+
+        log.info("Question {} rejected",
+                questionId);
+
         return toResponse(question);
     }
 
@@ -104,6 +120,10 @@ public class QuestionReviewService {
                 // ─────────────────────────────────────────────────────────────
             }
         }
+
+        log.info("Bulk approved {} questions",
+                approved);
+
         return approved;
     }
 

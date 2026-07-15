@@ -134,6 +134,8 @@ public class EmbeddingService {
                 .POST(HttpRequest.BodyPublishers.ofString(requestJson))
                 .build();
 
+        log.info("Calling embedding API for {} text(s)", texts.size());
+
         HttpResponse<String> response = httpClient.send(request,
                 HttpResponse.BodyHandlers.ofString());
 
@@ -171,7 +173,8 @@ public class EmbeddingService {
             embeddings.add(vec);
         }
 
-        log.debug("Got {} embeddings from OpenAI", embeddings.size());
+        log.info("Received {} embedding(s) from OpenAI",
+                embeddings.size());
         return embeddings;
     }
 

@@ -3,6 +3,7 @@ package com.secai.service;
 import com.secai.domain.user.AppUser;
 import io.jsonwebtoken.*;
 import io.jsonwebtoken.security.Keys;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -11,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Date;
 import java.util.UUID;
 
+@Slf4j
 @Service
 public class JwtService {
 
@@ -29,7 +31,7 @@ public class JwtService {
      * Generate JWT with userId, orgId, email claims.
      */
     public String generateToken(AppUser user) {
-        return Jwts.builder()
+        String token = Jwts.builder()
                 .subject(user.getId().toString())
                 .claim("orgId", user.getOrganization().getId().toString())
                 .claim("email", user.getEmail())
@@ -37,6 +39,12 @@ public class JwtService {
                 .expiration(new Date(System.currentTimeMillis() + expirationMs))
                 .signWith(key)
                 .compact();
+
+        log.info("Generated JWT for user {} in organization {}",
+                user.getEmail(),
+                user.getOrganization().getId());
+
+        return token;
     }
 
     /**

@@ -51,8 +51,12 @@ public class StorageService {
     public void ensureBucketExists() {
         try {
             s3.headBucket(HeadBucketRequest.builder().bucket(bucket).build());
+            log.info("Storage bucket '{}' is available",
+                    bucket);
         } catch (NoSuchBucketException e) {
             s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
+            log.info("Created storage bucket '{}'",
+                    bucket);
         }
     }
 
@@ -74,6 +78,10 @@ public class StorageService {
         } catch (IOException e) {
             throw new RuntimeException("Failed to upload file: " + e.getMessage(), e);
         }
+
+        log.info("Uploaded file to storage: {}",
+                key);
+
         return key;
     }
 
@@ -85,6 +93,9 @@ public class StorageService {
                 .bucket(bucket)
                 .key(storagePath)
                 .build());
+
+        log.info("Deleted file from storage: {}",
+                storagePath);
     }
 
     // ── ADD: Download file from S3 to a local temp file ──────────────────────────
@@ -99,19 +110,20 @@ public class StorageService {
      */
     public Path downloadToTemp(String storagePath, String filename) {
         try {
-            // Preserve extension so extractors can identify the type
             String suffix = filename.contains(".")
                     ? filename.substring(filename.lastIndexOf('.'))
                     : ".tmp";
 
-            Path tempFile = Files.createTempFile("secai-", suffix);
+            Path tempDir = Files.createTempDirectory("secai-");
+            Path tempFile = tempDir.resolve("document" + suffix);
 
-            GetObjectRequest getRequest = GetObjectRequest.builder()
+            GetObjectRequest request = GetObjectRequest.builder()
                     .bucket(bucket)
                     .key(storagePath)
                     .build();
 
-            s3.getObject(getRequest, tempFile);
+            s3.getObject(request, tempFile);
+
             return tempFile;
 
         } catch (Exception e) {
@@ -137,6 +149,10 @@ public class StorageService {
                             .build(),
                     RequestBody.fromBytes(bytes)
             );
+
+            log.info("Stored extracted text: {}",
+                    key);
+
             return key;
         } catch (Exception e) {
             // Non-fatal: extracted text storage is for debugging only

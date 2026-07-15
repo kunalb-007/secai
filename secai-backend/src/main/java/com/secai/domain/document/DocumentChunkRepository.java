@@ -1,5 +1,6 @@
 package com.secai.domain.document;
 
+import jakarta.transaction.Transactional;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -112,6 +113,7 @@ public interface DocumentChunkRepository extends JpaRepository<DocumentChunk, UU
      * Unchanged from Phase 3.
      */
     @Modifying
+    @Transactional
     @Query("DELETE FROM DocumentChunk c WHERE c.documentId = :docId AND c.organizationId = :orgId")
     void deleteByDocumentIdAndOrganizationId(
             @Param("docId")  UUID docId,

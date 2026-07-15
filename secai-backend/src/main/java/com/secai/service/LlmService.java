@@ -78,8 +78,8 @@ public class LlmService {
         // Build OpenAI-compatible chat request
         ObjectNode body = mapper.createObjectNode();
         body.put("model", chatModel);
-        body.put("max_tokens", 1000);
-        body.put("temperature", 0.1);   // low temp for factual answers
+        body.put("max_tokens", 120);  // 50 words ≈ 70 tokens; 120 gives headroom
+        body.put("temperature", 0.0);   // low temp for factual answers
 
         ArrayNode messages = body.putArray("messages");
 
@@ -101,6 +101,9 @@ public class LlmService {
                 .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(body)))
                 .build();
 
+        log.info("Calling chat completion API using model {}",
+                chatModel);
+
         HttpResponse<String> response = httpClient.send(request,
                 HttpResponse.BodyHandlers.ofString());
 
@@ -114,11 +117,15 @@ public class LlmService {
         }
 
         JsonNode json = mapper.readTree(response.body());
-        return json
+        String content = json
                 .path("choices").get(0)
                 .path("message")
                 .path("content")
                 .asText("");
+
+        log.info("Received chat completion response");
+
+        return content;
     }
 
     private static class RateLimitException extends RuntimeException {

@@ -105,16 +105,18 @@ public class TextChunker {
 
             sections.add(new Section(
                     headingFound
-                            ? currentTitle
+                            ? (currentTitle != null ? currentTitle : "Document")
                             : "Document",
                     currentBody.toString().strip()
             ));
         }
 
-//        // If no sections found (no headings), treat whole document as one section
-//        if (sections.isEmpty() && !text.isBlank()) {
-//            sections.add(new Section("Document", text.strip()));
-//        }
+        // CRITICAL FIX: if no headings found, treat whole document as one section.
+        // Without this, plain TXT files and DOCX without heading styles produce
+        // zero chunks, causing DocumentProcessingService to throw.
+        if (sections.isEmpty() && !text.isBlank()) {
+            sections.add(new Section("Document", text.strip()));
+        }
 
         return sections;
     }

@@ -58,6 +58,7 @@ public class DocumentProcessingService {
      * @param documentId the document to process
      * @throws Exception if processing fails (caller handles retry and FAILED status)
      */
+    @Transactional
     public void process(UUID documentId) throws Exception {
         Document doc = documentRepo.findById(documentId)
                 .orElseThrow(() -> new IllegalArgumentException("Document not found: " + documentId));
@@ -166,7 +167,7 @@ public class DocumentProcessingService {
         }
     }
 
-    @Transactional
+//    @Transactional
     private void saveBatched(List<DocumentChunk> chunks, int batchSize) {
         for (int i = 0; i < chunks.size(); i += batchSize) {
             List<DocumentChunk> batch = chunks.subList(i, Math.min(i + batchSize, chunks.size()));

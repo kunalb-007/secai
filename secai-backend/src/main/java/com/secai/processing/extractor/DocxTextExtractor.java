@@ -39,19 +39,16 @@ public class DocxTextExtractor implements TextExtractor {
                 // Map Word heading styles → Markdown heading syntax
                 // so our chunker can split uniformly regardless of source format
                 if (style != null) {
-                    if (style.startsWith("Heading1") || style.equals("1")) {
+                    String s = style.toLowerCase().replace(" ", "");
+                    if (s.startsWith("heading1") || s.equals("title")) {
                         sb.append("# ").append(text).append("\n\n");
-                    } else if (style.startsWith("Heading2") || style.equals("2")) {
+                    } else if (s.startsWith("heading2") || s.equals("subtitle")) {
                         sb.append("## ").append(text).append("\n\n");
-                    } else if (style.startsWith("Heading3") || style.equals("3")) {
+                    } else if (s.startsWith("heading3")) {
                         sb.append("### ").append(text).append("\n\n");
-                    } else if (style.startsWith("Title")) {
-                        sb.append("# ").append(text).append("\n\n");
                     } else {
                         sb.append(text).append("\n");
                     }
-                } else {
-                    sb.append(text).append("\n");
                 }
             }
 

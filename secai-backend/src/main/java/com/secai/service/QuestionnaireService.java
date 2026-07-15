@@ -53,6 +53,9 @@ public class QuestionnaireService {
     public QuestionnaireUploadResponse uploadAndParse(MultipartFile file) {
         UUID orgId = TenantContext.get();
 
+        log.info("Questionnaire upload received: {}",
+                file.getOriginalFilename());
+
         // Validate file
         validateFile(file);
 
@@ -92,6 +95,10 @@ public class QuestionnaireService {
                         .build()
         );
 
+        log.info("Created questionnaire {} for organization {}",
+                q.getId(),
+                orgId);
+
         // Save all questions in one batch
         List<Question> questions = parseResult.questions().stream()
                 .map(pq -> Question.builder()
@@ -107,6 +114,9 @@ public class QuestionnaireService {
                 .toList();
         questionRepo.saveAll(questions);
 
+        log.info("Persisted {} questionnaire questions",
+                questions.size());
+
         // Create AI generation job (status=PENDING — triggered in Phase 5)
         AiGenerationJob job = jobRepo.save(
                 AiGenerationJob.builder()
@@ -117,10 +127,20 @@ public class QuestionnaireService {
                         .build()
         );
 
+        log.info("Created AI generation job {} for questionnaire {}",
+                job.getId(),
+                q.getId());
+
+        log.info("Triggering document coverage analysis for questionnaire {}",
+                q.getId());
+
         // ── NEW: trigger coverage analysis asynchronously ───────────────────────────
         coverageAnalysisService.triggerAnalysis(q.getId(), orgId);
 
-        log.info("Questionnaire {} saved: {} questions, job {}", q.getId(), questions.size(), job.getId());
+        log.info("Questionnaire upload completed successfully: questionnaire={}, questions={}, generationJob={}",
+                q.getId(),
+                questions.size(),
+                job.getId());
 
         // Build preview (first 10 questions)
         List<QuestionnaireUploadResponse.QuestionPreview> preview = parseResult.questions()
@@ -234,6 +254,9 @@ public class QuestionnaireService {
 
         questionRepo.deleteByQuestionnaireIdAndOrganizationId(questionnaireId, orgId);
         questionnaireRepo.delete(q);
+
+        log.info("Deleted questionnaire {}",
+                questionnaireId);
     }
 
     // ── Mapping helpers ───────────────────────────────────────────────────────

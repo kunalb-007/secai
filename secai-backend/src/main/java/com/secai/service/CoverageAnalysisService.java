@@ -56,7 +56,7 @@ public class CoverageAnalysisService {
     private static final Logger log = LoggerFactory.getLogger(CoverageAnalysisService.class);
 
     private static final int    MAX_SAMPLE_PER_CATEGORY = 8;
-    private static final double COVERAGE_THRESHOLD      = 0.30;  // cosine distance
+    private static final double COVERAGE_THRESHOLD      = 0.35;  // cosine distance
     private static final int    RETRIEVAL_TOP_K         = 3;
     private static final double LOW_COVERAGE_THRESHOLD  = 0.60;  // below this → suggest doc
 
@@ -102,19 +102,22 @@ public class CoverageAnalysisService {
     private final QuestionRepository       questionRepo;
     private final DocumentChunkRepository  chunkRepo;
     private final EmbeddingService         embeddingService;
+    private final CoverageAnalysisAsyncRunner asyncRunner;
 
     public CoverageAnalysisService(
             CoverageReportRepository coverageRepo,
             QuestionnaireRepository  questionnaireRepo,
             QuestionRepository       questionRepo,
             DocumentChunkRepository  chunkRepo,
-            EmbeddingService         embeddingService
+            EmbeddingService         embeddingService,
+            CoverageAnalysisAsyncRunner asyncRunner
     ) {
         this.coverageRepo      = coverageRepo;
         this.questionnaireRepo = questionnaireRepo;
         this.questionRepo      = questionRepo;
         this.chunkRepo         = chunkRepo;
         this.embeddingService  = embeddingService;
+        this.asyncRunner       = asyncRunner;
     }
 
     // ── Trigger (called after questionnaire upload) ───────────────────────────
@@ -126,7 +129,8 @@ public class CoverageAnalysisService {
      */
     @Transactional
     public void triggerAnalysis(UUID questionnaireId, UUID orgId) {
-        // Delete any prior report for this questionnaire (re-upload scenario)
+        log.info("[coverage] Triggering analysis for questionnaire {}", questionnaireId);
+
         coverageRepo.findByQuestionnaireId(questionnaireId)
                 .ifPresent(coverageRepo::delete);
 
@@ -143,8 +147,8 @@ public class CoverageAnalysisService {
                         .build()
         );
 
-        // Dispatch async
-        runAnalysisAsync(report.getId(), questionnaireId, orgId);
+        // Dispatch via separate bean — @Async proxy fires correctly
+        asyncRunner.runAsync(report.getId(), questionnaireId, orgId);
     }
 
     // ── Polling ───────────────────────────────────────────────────────────────
@@ -185,6 +189,9 @@ public class CoverageAnalysisService {
      */
     @Transactional
     public void refreshAnalysis(UUID questionnaireId, UUID orgId) {
+        log.info("[coverage] Refresh requested for questionnaire {}",
+                questionnaireId);
+
         questionnaireRepo.findByIdAndOrganizationId(questionnaireId, orgId)
                 .orElseThrow(() -> new NotFoundException("Questionnaire not found"));
 
@@ -193,8 +200,9 @@ public class CoverageAnalysisService {
 
     // ── Async analysis pipeline ───────────────────────────────────────────────
 
-    @Async
-    public void runAnalysisAsync(UUID reportId, UUID questionnaireId, UUID orgId) {
+    // Rename runAnalysisAsync → runAnalysis, remove @Async annotation
+// (async dispatch is now handled by CoverageAnalysisAsyncRunner)
+    public void runAnalysis(UUID reportId, UUID questionnaireId, UUID orgId) {
         log.info("[coverage:{}] Starting analysis for questionnaire {}", reportId, questionnaireId);
 
         CoverageReport report = coverageRepo.findById(reportId).orElse(null);
@@ -205,7 +213,6 @@ public class CoverageAnalysisService {
         coverageRepo.save(report);
 
         try {
-            // Load all questions for this questionnaire
             List<Question> allQuestions =
                     questionRepo.findByQuestionnaireIdAndOrganizationIdOrderBySortOrder(
                             questionnaireId, orgId
@@ -216,41 +223,27 @@ public class CoverageAnalysisService {
                 return;
             }
 
-            // Group questions by category
             Map<String, List<Question>> byCategory = allQuestions.stream()
                     .collect(Collectors.groupingBy(
                             q -> q.getCategory() != null ? q.getCategory() : "General"
                     ));
 
-            // Analyse each category
             List<CategoryCoverage> categoryResults = new ArrayList<>();
             int totalAnswerable = 0;
 
             for (Map.Entry<String, List<Question>> entry : byCategory.entrySet()) {
-                String         category  = entry.getKey();
-                List<Question> questions = entry.getValue();
-
-                CategoryCoverage result = analyseCategory(category, questions, orgId);
+                CategoryCoverage result = analyseCategory(entry.getKey(), entry.getValue(), orgId);
                 categoryResults.add(result);
                 totalAnswerable += result.getAnswerableQuestions();
-
-                log.debug("[coverage:{}] Category '{}': {}/{} answerable ({:.0f}%)",
-                        reportId, category,
-                        result.getAnswerableQuestions(), result.getTotalQuestions(),
-                        result.getCoverage() * 100);
+                log.info("[coverage:{}] Category '{}' -> {}/{} answerable",
+                        reportId, entry.getKey(),
+                        result.getAnswerableQuestions(), result.getTotalQuestions());
             }
 
-            // Derive missing document suggestions
             List<String> suggestions = deriveSuggestions(categoryResults);
-
-            // Estimate coverage after uploading suggested docs
             double estimatedAfter = estimateCoverageAfter(
                     allQuestions.size(), totalAnswerable, categoryResults
             );
-
-            double overallCoverage = allQuestions.isEmpty()
-                    ? 0.0
-                    : (double) totalAnswerable / allQuestions.size();
 
             markComplete(
                     report,
@@ -261,15 +254,36 @@ public class CoverageAnalysisService {
                     BigDecimal.valueOf(estimatedAfter).setScale(4, RoundingMode.HALF_UP)
             );
 
-            log.info("[coverage:{}] Analysis complete. Overall: {:.0f}% ({}/{} answerable)",
-                    reportId, overallCoverage * 100, totalAnswerable, allQuestions.size());
-
         } catch (Exception e) {
             log.error("[coverage:{}] Analysis failed: {}", reportId, e.getMessage(), e);
             report.setStatus("FAILED");
             report.setCompletedAt(OffsetDateTime.now());
             coverageRepo.save(report);
         }
+    }
+
+    // Fix markComplete — remove @Transactional (self-invocation, doesn't work anyway;
+// the save is fine without explicit transaction for this simple update)
+    private void markComplete(
+            CoverageReport report,
+            int totalQ,
+            int answerable,
+            List<CategoryCoverage> categories,
+            List<String> suggestions,
+            BigDecimal estimatedAfter
+    ) {
+        double overall = totalQ == 0 ? 0.0 : (double) answerable / totalQ;
+        report.setStatus("COMPLETE");
+        report.setTotalQuestions(totalQ);
+        report.setAnswerableQuestions(answerable);
+        report.setOverallCoverage(
+                BigDecimal.valueOf(overall).setScale(4, RoundingMode.HALF_UP)
+        );
+        report.setCategoryBreakdown(categories);
+        report.setMissingDocSuggestions(suggestions);
+        report.setEstimatedCoverageAfter(estimatedAfter);
+        report.setCompletedAt(OffsetDateTime.now());
+        coverageRepo.save(report);
     }
 
     // ── Category analysis ─────────────────────────────────────────────────────
@@ -288,11 +302,15 @@ public class CoverageAnalysisService {
 
         for (Question q : sample) {
             try {
-                boolean answerable = isAnswerable(q.getQuestionText(), orgId);
+                boolean answerable = isAnswerable(q.getQuestionText(), q.getQuestionText(), orgId);
                 if (answerable) answerableInSample++;
             } catch (Exception e) {
-                // If embedding fails for one question, skip it
-                log.warn("[coverage] Embedding failed for question {}: {}", q.getId(), e.getMessage());
+                log.warn(
+                        "[coverage] Failed analysing category='{}' question='{}'",
+                        category,
+                        q.getQuestionText(),
+                        e
+                );
             }
         }
 
@@ -317,14 +335,70 @@ public class CoverageAnalysisService {
                 .build();
     }
 
-    private boolean isAnswerable(String questionText, UUID orgId) {
-        float[] embedding  = embeddingService.embed(questionText);
-        String  embStr     = embeddingService.toVectorString(embedding);
+    private boolean isAnswerable(
+            String category,
+            String questionText,
+            UUID orgId
+    ) {
+
+        String query =
+                (category == null || category.isBlank())
+                        ? questionText
+                        : category + "\n\n" + questionText;
+
+        float[] embedding = embeddingService.embed(query);
+
+        String embStr = embeddingService.toVectorString(embedding);
 
         List<Object[]> rows = chunkRepo.findSimilarRaw(
-                orgId, embStr, COVERAGE_THRESHOLD, RETRIEVAL_TOP_K
+                orgId,
+                embStr,
+                COVERAGE_THRESHOLD,
+                RETRIEVAL_TOP_K
         );
-        return !rows.isEmpty();
+
+        for (Object[] row : rows) {
+
+            Double distance = row[8] != null
+                    ? ((Number) row[8]).doubleValue()
+                    : null;
+
+            String preview = row[4] == null
+                    ? ""
+                    : row[4].toString();
+
+            if (preview.length() > 120) {
+                preview = preview.substring(0, 120);
+            }
+
+            log.debug(
+                    "[coverage] distance={} chunk='{}'",
+                    distance,
+                    preview
+            );
+        }
+
+        if (rows.isEmpty()) {
+
+            log.debug(
+                    "[coverage] No evidence found for '{}'",
+                    questionText
+            );
+
+            return false;
+        }
+
+        Double distance = rows.get(0)[8] != null
+                ? ((Number) rows.get(0)[8]).doubleValue()
+                : null;
+
+        log.debug(
+                "[coverage] Match found. distance={}, question='{}'",
+                distance,
+                questionText
+        );
+
+        return true;
     }
 
     // ── Document suggestions ──────────────────────────────────────────────────
@@ -398,28 +472,5 @@ public class CoverageAnalysisService {
         if (coverage >= 0.60) return "MEDIUM";
         if (coverage >= 0.35) return "LOW";
         return "CRITICAL";
-    }
-
-    @Transactional
-    private void markComplete(
-            CoverageReport report,
-            int totalQ,
-            int answerable,
-            List<CategoryCoverage> categories,
-            List<String> suggestions,
-            BigDecimal estimatedAfter
-    ) {
-        double overall = totalQ == 0 ? 0.0 : (double) answerable / totalQ;
-        report.setStatus("COMPLETE");
-        report.setTotalQuestions(totalQ);
-        report.setAnswerableQuestions(answerable);
-        report.setOverallCoverage(
-                BigDecimal.valueOf(overall).setScale(4, RoundingMode.HALF_UP)
-        );
-        report.setCategoryBreakdown(categories);
-        report.setMissingDocSuggestions(suggestions);
-        report.setEstimatedCoverageAfter(estimatedAfter);
-        report.setCompletedAt(OffsetDateTime.now());
-        coverageRepo.save(report);
     }
 }
