@@ -31,17 +31,20 @@ public class QuestionnaireService {
     private final QuestionRepository         questionRepo;
     private final AiGenerationJobRepository  jobRepo;
     private final QuestionnaireParserFactory parserFactory;
+    private final CoverageAnalysisService coverageAnalysisService;
 
     public QuestionnaireService(
             QuestionnaireRepository    questionnaireRepo,
             QuestionRepository         questionRepo,
             AiGenerationJobRepository  jobRepo,
-            QuestionnaireParserFactory parserFactory
+            QuestionnaireParserFactory parserFactory,
+            CoverageAnalysisService coverageAnalysisService
     ) {
         this.questionnaireRepo = questionnaireRepo;
         this.questionRepo      = questionRepo;
         this.jobRepo           = jobRepo;
         this.parserFactory     = parserFactory;
+        this.coverageAnalysisService = coverageAnalysisService;
     }
 
     // ── Upload & Parse ─────────────────────────────────────────────────────────
@@ -113,6 +116,9 @@ public class QuestionnaireService {
                         .completedQuestions(0)
                         .build()
         );
+
+        // ── NEW: trigger coverage analysis asynchronously ───────────────────────────
+        coverageAnalysisService.triggerAnalysis(q.getId(), orgId);
 
         log.info("Questionnaire {} saved: {} questions, job {}", q.getId(), questions.size(), job.getId());
 

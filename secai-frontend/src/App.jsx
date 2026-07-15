@@ -12,6 +12,7 @@ import QuestionnaireUploadPage     from './pages/QuestionnaireUploadPage';
 import QuestionnaireListPage       from './pages/QuestionnaireListPage';
 import QuestionnaireDetailPage     from './pages/QuestionnaireDetailPage';
 import QuestionnaireReviewPage     from './pages/QuestionnaireReviewPage';
+import CoverageAnalysisPage        from './pages/CoverageAnalysisPage';
 
 export default function App() {
   return (
@@ -31,6 +32,8 @@ export default function App() {
                    element={<PrivateRoute><QuestionnaireUploadPage /></PrivateRoute>} />
             <Route path="/questionnaires/:id/review"
                    element={<PrivateRoute><QuestionnaireReviewPage /></PrivateRoute>} />
+            <Route path="/questionnaires/:id/coverage"
+                   element={<PrivateRoute><CoverageAnalysisPage /></PrivateRoute>} />
             <Route path="/questionnaires/:id"
                    element={<PrivateRoute><QuestionnaireDetailPage /></PrivateRoute>} />
             <Route path="/questionnaires"

@@ -26,6 +26,9 @@ dayjs.extend(relativeTime);
 const { Title, Text } = Typography;
 const { Option } = Select;
 
+import { getCoverage }         from '../api/coverage';
+import { CoverageBar, CoverageTierTag } from '../components/CoverageGauge';
+
 const STATUS_COLOR = {
     PENDING:    'default',
     GENERATED:  'processing',
@@ -58,6 +61,17 @@ export default function QuestionnaireDetailPage() {
     const [generating, setGenerating]     = useState(false);
     const [genError, setGenError]         = useState('');
     const [pollId, setPollId]             = useState(null);
+
+    const [coverage, setCoverage] = useState(null);
+
+    useEffect(() => {
+        (async () => {
+            try {
+                const res = await getCoverage(id);
+                if (res.data?.status === 'COMPLETE') setCoverage(res.data);
+            } catch { /* non-fatal */ }
+        })();
+    }, [id]);
 
     // Poll when generation is running
     const onGenerationComplete = useCallback(() => {
@@ -311,6 +325,39 @@ export default function QuestionnaireDetailPage() {
                         </Col>
                     ))}
                 </Row>
+
+                {/* Coverage banner — shown when analysis is complete */}
+                {coverage && (
+                    <Card
+                        style={{ marginBottom: 16, cursor: 'pointer' }}
+                        bodyStyle={{ padding: '14px 20px' }}
+                        onClick={() => navigate(`/questionnaires/${id}/coverage`)}
+                        hoverable
+                    >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <div style={{ flex: 1, marginRight: 24 }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+                                    <Text strong style={{ fontSize: 14 }}>Knowledge Base Coverage</Text>
+                                    <CoverageTierTag tier={coverage.coverageTier} />
+                                    {coverage.missingDocSuggestions?.length > 0 && (
+                                        <Tag color="warning" icon={<WarningOutlined />}>
+                                            {coverage.missingDocSuggestions.length} doc{coverage.missingDocSuggestions.length > 1 ? 's' : ''} missing
+                                        </Tag>
+                                    )}
+                                </div>
+                                <CoverageBar percent={coverage.overallPercent} tier={coverage.coverageTier} showLabel={false} />
+                            </div>
+                            <div style={{ textAlign: 'right', minWidth: 80 }}>
+                                <div style={{ fontSize: 28, fontWeight: 800,
+                                    color: coverage.overallPercent >= 75 ? '#52c41a'
+                                        : coverage.overallPercent >= 55 ? '#faad14' : '#ff4d4f' }}>
+                                    {coverage.overallPercent}%
+                                </div>
+                                <Text type="secondary" style={{ fontSize: 11 }}>View details →</Text>
+                            </div>
+                        </div>
+                    </Card>
+                )}
 
                 {/* Questions table */}
                 <Card

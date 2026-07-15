@@ -2,7 +2,7 @@
 import { Layout, Menu, Button, Typography } from 'antd';
 import {
     SafetyCertificateOutlined, FileTextOutlined, UploadOutlined,
-    LogoutOutlined, FileExcelOutlined, PlusOutlined, EyeOutlined,
+    LogoutOutlined, FileExcelOutlined, PlusOutlined, EyeOutlined, BarChartOutlined,
 } from '@ant-design/icons';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
@@ -18,17 +18,22 @@ export default function AppLayout({ children }) {
     const handleLogout = () => { logout(); navigate('/login'); };
 
     const selectedKey = (() => {
-        if (location.pathname === '/questionnaires/upload')  return 'q-upload';
-        if (location.pathname.endsWith('/review'))           return 'q-review';
-        if (location.pathname.startsWith('/questionnaires')) return 'questionnaires';
-        if (location.pathname === '/documents/upload')       return 'doc-upload';
-        if (location.pathname.startsWith('/documents'))      return 'documents';
+        if (location.pathname === '/questionnaires/upload')       return 'q-upload';
+        if (location.pathname.endsWith('/review'))                return 'q-review';
+        if (location.pathname.endsWith('/coverage'))             return 'q-coverage';
+        if (location.pathname.startsWith('/questionnaires'))     return 'questionnaires';
+        if (location.pathname === '/documents/upload')           return 'doc-upload';
+        if (location.pathname.startsWith('/documents'))          return 'documents';
         return 'dashboard';
     })();
 
     // Pull questionnaire ID from review URL so we can link back to it
     const reviewMatch = location.pathname.match(/\/questionnaires\/([^/]+)\/review/);
     const reviewId    = reviewMatch?.[1] ?? null;
+
+    // Extract coverage ID from URL:
+    const coverageMatch = location.pathname.match(/\/questionnaires\/([^/]+)\/coverage/);
+    const coverageId    = coverageMatch?.[1] ?? null;
 
     return (
         <Layout style={{ minHeight: '100vh' }}>
@@ -76,6 +81,11 @@ export default function AppLayout({ children }) {
                                     key: 'q-review',
                                     icon: <EyeOutlined />,
                                     label: <Link to={`/questionnaires/${reviewId}/review`}>Review Answers</Link>,
+                                }] : []),
+                                ...(coverageId ? [{
+                                    key: 'q-coverage',
+                                    icon: <BarChartOutlined />,
+                                    label: <Link to={`/questionnaires/${coverageId}/coverage`}>Coverage Analysis</Link>,
                                 }] : []),
                             ],
                         },
