@@ -12,33 +12,24 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.List;
 import java.util.UUID;
 
-/**
- * Phase 6 — Human review: edit, approve, reject, bulk-approve.
- *
- * Every mutating method validates org ownership via TenantContext before acting.
- * Individual question status transitions:
- *   GENERATED → EDITED    (edit)
- *   GENERATED → APPROVED  (approve)
- *   GENERATED → REJECTED  (reject)
- *   EDITED    → APPROVED  (approve after edit)
- *   EDITED    → REJECTED  (reject)
- *   REJECTED  → EDITED    (re-edit a rejection)
- */
 @Service
 public class QuestionReviewService {
 
     private final QuestionRepository      questionRepo;
     private final QuestionnaireRepository questionnaireRepo;
+    private final AnswerLibraryService    libraryService;   // ← NEW injection
 
     public QuestionReviewService(
             QuestionRepository      questionRepo,
-            QuestionnaireRepository questionnaireRepo
+            QuestionnaireRepository questionnaireRepo,
+            AnswerLibraryService    libraryService             // ← NEW injection
     ) {
         this.questionRepo      = questionRepo;
         this.questionnaireRepo = questionnaireRepo;
+        this.libraryService    = libraryService;
     }
 
-    // ── Single-question actions ────────────────────────────────────────────────
+    // ── Edit ──────────────────────────────────────────────────────────────────
 
     @Transactional
     public QuestionResponse editAnswer(UUID questionId, QuestionAnswerUpdateRequest req) {
@@ -47,24 +38,34 @@ public class QuestionReviewService {
         if (req.manualAnswer() == null || req.manualAnswer().isBlank()) {
             throw new IllegalArgumentException("Answer cannot be blank.");
         }
-
         question.setManualAnswer(req.manualAnswer().trim());
         question.setStatus(QuestionStatus.EDITED);
         questionRepo.save(question);
         return toResponse(question);
     }
 
+    // ── Approve ───────────────────────────────────────────────────────────────
+
     @Transactional
     public QuestionResponse approve(UUID questionId) {
+        UUID orgId = TenantContext.get();                    // capture before async
         Question question = loadAndVerify(questionId);
 
         if (question.getStatus() == QuestionStatus.PENDING) {
-            throw new IllegalStateException("Cannot approve a question that has no AI answer yet.");
+            throw new IllegalStateException("Cannot approve a question with no AI answer yet.");
         }
         question.setStatus(QuestionStatus.APPROVED);
         questionRepo.save(question);
+
+        // ── NEW: index in library (async — never blocks the HTTP response) ──
+        String approverEmail = TenantContext.getEmail();     // see TenantContext update below
+        libraryService.indexApprovedAnswer(questionId, approverEmail, orgId);
+        // ────────────────────────────────────────────────────────────────────
+
         return toResponse(question);
     }
+
+    // ── Reject ────────────────────────────────────────────────────────────────
 
     @Transactional
     public QuestionResponse reject(UUID questionId) {
@@ -76,18 +77,12 @@ public class QuestionReviewService {
         return toResponse(question);
     }
 
-    // ── Bulk actions ──────────────────────────────────────────────────────────
+    // ── Bulk approve ──────────────────────────────────────────────────────────
 
-    /**
-     * Bulk-approve a list of question IDs in a single transaction.
-     * Only GENERATED or EDITED questions are approved; others are silently skipped.
-     * All IDs must belong to the current org — any mismatch throws ForbiddenException.
-     *
-     * @return count of questions actually approved
-     */
     @Transactional
     public int bulkApprove(List<UUID> questionIds) {
         UUID orgId = TenantContext.get();
+        String approverEmail = TenantContext.getEmail();     // ← NEW
         int approved = 0;
 
         for (UUID id : questionIds) {
@@ -98,15 +93,17 @@ public class QuestionReviewService {
                 throw new ForbiddenException("Access denied to question: " + id);
             }
 
-            // Only approve answerable statuses — skip PENDING / already APPROVED
             if (q.getStatus() == QuestionStatus.GENERATED
                     || q.getStatus() == QuestionStatus.EDITED) {
                 q.setStatus(QuestionStatus.APPROVED);
                 questionRepo.save(q);
                 approved++;
+
+                // ── NEW: index each bulk-approved answer in library ──────────
+                libraryService.indexApprovedAnswer(id, approverEmail, orgId);
+                // ─────────────────────────────────────────────────────────────
             }
         }
-
         return approved;
     }
 
@@ -116,7 +113,6 @@ public class QuestionReviewService {
         UUID orgId = TenantContext.get();
         Question question = questionRepo.findById(questionId)
                 .orElseThrow(() -> new NotFoundException("Question not found"));
-
         if (!orgId.equals(question.getOrganizationId())) {
             throw new ForbiddenException("Access denied to this question");
         }
@@ -125,15 +121,9 @@ public class QuestionReviewService {
 
     private QuestionResponse toResponse(Question q) {
         return new QuestionResponse(
-                q.getId(),
-                q.getQuestionNumber(),
-                q.getQuestionText(),
-                q.getCategory(),
-                q.getAiAnswer(),
-                q.getEvidence(),
-                q.getRetrievalScore(),
-                q.getStatus(),
-                q.getManualAnswer(),
+                q.getId(), q.getQuestionNumber(), q.getQuestionText(),
+                q.getCategory(), q.getAiAnswer(), q.getEvidence(),
+                q.getRetrievalScore(), q.getStatus(), q.getManualAnswer(),
                 q.getSortOrder()
         );
     }

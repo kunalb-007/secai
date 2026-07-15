@@ -21,6 +21,8 @@ import {
     bulkApprove, exportQuestionnaire,
 } from '../api/questionnaires';
 import { useGenerationPoller } from '../hooks/useGenerationPoller';
+import { reuseLibraryAnswer } from '../api/library';
+import { useLibraryMatches } from '../hooks/useLibraryMatches';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 
@@ -65,6 +67,119 @@ const FILTER_OPTIONS = [
     { value: 'EDITED',         label: 'Edited'           },
     { value: 'REJECTED',       label: 'Rejected'         },
 ];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Library Match Card
+// Shown inline in the AI Answer column when a similar approved answer exists.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function LibraryMatchCard({ match, questionId, onReused, onDismiss }) {
+    const [loading, setLoading] = useState(false);
+    const [dismissed, setDismissed] = useState(false);
+
+    if (dismissed || !match) return null;
+
+    const pct = match.similarityPercent;
+    const pctColor = pct >= 90 ? '#52c41a' : pct >= 82 ? '#faad14' : '#1890ff';
+
+    const handleReuse = async () => {
+        setLoading(true);
+        try {
+            await reuseLibraryAnswer(questionId, match.libraryEntryId);
+            onReused();
+            message.success('Answer reused from library');
+        } catch {
+            message.error('Could not reuse answer. Please try again.');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    return (
+        <div style={{
+            margin: '6px 0 4px',
+            padding: '10px 12px',
+            background: '#f6ffed',
+            border: '1px solid #b7eb8f',
+            borderLeft: `3px solid ${pctColor}`,
+            borderRadius: 6,
+            fontSize: 12,
+        }}>
+            {/* Header row */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <Space size={6}>
+                    <CheckCircleOutlined style={{ color: pctColor, fontSize: 13 }} />
+                    <Text strong style={{ fontSize: 12, color: '#135200' }}>
+                        Found approved answer
+                    </Text>
+                    <span style={{
+                        background: pctColor, color: '#fff',
+                        borderRadius: 8, padding: '1px 7px',
+                        fontWeight: 700, fontSize: 11,
+                    }}>
+            {pct}% match
+          </span>
+                </Space>
+                <Button
+                    type="text" size="small"
+                    icon={<CloseOutlined />}
+                    style={{ color: '#8c8c8c', padding: '0 4px', height: 18 }}
+                    onClick={() => { setDismissed(true); onDismiss?.(); }}
+                />
+            </div>
+
+            {/* Original question */}
+            <div style={{ marginBottom: 4 }}>
+                <Text type="secondary" style={{ fontSize: 11 }}>Q: </Text>
+                <Text style={{ fontSize: 11, color: '#555' }}>{match.sourceQuestionText}</Text>
+            </div>
+
+            {/* Approved answer */}
+            <div style={{ marginBottom: 4 }}>
+                <Text type="secondary" style={{ fontSize: 11 }}>A: </Text>
+                <Text style={{ fontSize: 12, fontWeight: 500 }}>
+                    {match.answerText.length > 160
+                        ? match.answerText.slice(0, 160) + '…'
+                        : match.answerText}
+                </Text>
+            </div>
+
+            {/* Evidence + approver */}
+            {(match.evidence || match.approvedByEmail) && (
+                <div style={{ marginBottom: 8 }}>
+                    {match.evidence && match.evidence !== 'N/A' && (
+                        <Text type="secondary" style={{ fontSize: 11 }}>📄 {match.evidence} · </Text>
+                    )}
+                    {match.approvedByEmail && (
+                        <Text type="secondary" style={{ fontSize: 11 }}>
+                            Approved by {match.approvedByEmail}
+                            {match.approvedAt && ` · ${dayjs(match.approvedAt).format('MMM YYYY')}`}
+                        </Text>
+                    )}
+                </div>
+            )}
+
+            {/* Actions */}
+            <div style={{ display: 'flex', gap: 6 }}>
+                <Button
+                    type="primary" size="small"
+                    style={{ fontSize: 11, height: 24 }}
+                    loading={loading}
+                    onClick={handleReuse}
+                >
+                    Reuse this answer
+                </Button>
+                <Button
+                    size="small"
+                    style={{ fontSize: 11, height: 24 }}
+                    onClick={() => { setDismissed(true); onDismiss?.(); }}
+                >
+                    Dismiss
+                </Button>
+            </div>
+        </div>
+    );
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Edit Modal
@@ -219,8 +334,19 @@ export default function QuestionnaireReviewPage() {
     // ── Per-row action loading ─────────────────────────────────────────────────
     const [rowLoading, setRowLoading]   = useState({});
 
+    const libraryMatches = useLibraryMatches(questions);
+    const [dismissedMatches, setDismissedMatches] = useState(new Set());
+
     // ── Export ────────────────────────────────────────────────────────────────
     const [exporting, setExporting]     = useState(false);
+
+    const handleMatchReused = (questionId) => {
+        // Refresh the question row after reuse
+        fetchQuestions(currentPage, activeFilter);
+        fetchDetail();
+        // Clear the match so the card disappears
+        setDismissedMatches((prev) => new Set([...prev, questionId]));
+    };
 
     // ─────────────────────────────────────────────────────────────────────────
     // Generation polling
@@ -521,11 +647,29 @@ export default function QuestionnaireReviewPage() {
                     (record.status === 'EDITED' || record.status === 'REJECTED') && record.manualAnswer
                         ? record.manualAnswer
                         : answer;
-
                 const isEdited = record.status === 'EDITED' && record.manualAnswer;
+
+                // Library match for this question (if any and not dismissed)
+                const libMatch = libraryMatches[record.id];
+                const showMatch = libMatch
+                    && record.status === 'GENERATED'
+                    && !dismissedMatches.has(record.id);
 
                 return (
                     <div>
+                        {/* Library match card — shown above the AI answer */}
+                        {showMatch && (
+                            <LibraryMatchCard
+                                match={libMatch}
+                                questionId={record.id}
+                                onReused={() => handleMatchReused(record.id)}
+                                onDismiss={() =>
+                                    setDismissedMatches((prev) => new Set([...prev, record.id]))
+                                }
+                            />
+                        )}
+
+                        {/* AI / edited answer */}
                         <Text style={{ fontSize: 13, lineHeight: 1.5 }}>{displayAnswer}</Text>
                         {isEdited && (
                             <Tag color="cyan" style={{ marginLeft: 6, fontSize: 10 }}>Edited</Tag>
@@ -949,6 +1093,21 @@ export default function QuestionnaireReviewPage() {
                         </Space>
                     ))}
                 </div>
+
+                {Object.keys(libraryMatches).filter(id => libraryMatches[id]).length > 0 && (
+                    <div style={{
+                        marginTop: 8, padding: '6px 16px',
+                        background: '#f6ffed', borderRadius: 6,
+                        border: '1px solid #b7eb8f', fontSize: 12,
+                        display: 'flex', alignItems: 'center', gap: 8,
+                    }}>
+                        <CheckCircleOutlined style={{ color: '#52c41a' }} />
+                        <Text style={{ fontSize: 12, color: '#135200' }}>
+                            <strong>{Object.keys(libraryMatches).filter(id => libraryMatches[id]).length}</strong>
+                            {' '}questions on this page have approved answers from your library
+                        </Text>
+                    </div>
+                )}
 
                 {/* ── Edit Modal ────────────────────────────────────────────────── */}
                 <EditModal

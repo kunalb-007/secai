@@ -39,6 +39,9 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                 // Set TenantContext for this request thread
                 TenantContext.set(orgId);
 
+                String email = jwtService.extractClaims(token).get("email", String.class);
+                TenantContext.setEmail(email);
+
                 // Set Spring Security principal
                 var auth = new UsernamePasswordAuthenticationToken(
                         userId, null, List.of()
