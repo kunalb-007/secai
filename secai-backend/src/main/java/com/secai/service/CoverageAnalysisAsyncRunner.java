@@ -1,22 +1,13 @@
 package com.secai.service;
 
-import com.secai.domain.coverage.CoverageReport;
-import com.secai.domain.coverage.CoverageReport.CategoryCoverage;
 import com.secai.domain.coverage.CoverageReportRepository;
-import com.secai.domain.document.DocumentChunkRepository;
-import com.secai.domain.questionnaire.Question;
 import com.secai.domain.questionnaire.QuestionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
 
-import java.math.BigDecimal;
-import java.math.RoundingMode;
-import java.time.OffsetDateTime;
-import java.util.*;
-import java.util.stream.Collectors;
+import java.util.UUID;
 
 /**
  * Extracted async runner for coverage analysis.

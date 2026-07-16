@@ -109,6 +109,128 @@ public interface DocumentChunkRepository extends JpaRepository<DocumentChunk, UU
     }
 
     /**
+     * Hybrid search: combines pgvector cosine similarity with PostgreSQL full-text search.
+     *
+     * Why two strategies:
+     *   - Semantic (vector): finds conceptually related content. Good for broad questions.
+     *   - Keyword (FTS):     finds exact compliance terms. Good for "AES-256", "SOC 2 Type II",
+     *                        "MFA", "TLS 1.3" — terms whose embeddings may not cluster tightly.
+     *
+     * Score formula: (semantic_score * 0.7) + (keyword_score * 0.3)
+     *   Semantic weighted higher because meaning matters more than exact term presence.
+     *   Keyword weight prevents pure keyword matches (low semantic relevance) from ranking first.
+     *
+     * A chunk is included if EITHER condition is true:
+     *   - cosine distance < :vectorThreshold  (semantically similar)
+     *   - FTS query matches                   (keyword match)
+     * This is a UNION approach — we don't require both, because a very relevant chunk
+     * might score low on FTS if it paraphrases the term (e.g., "256-bit AES" vs "AES-256").
+     *
+     * Returns Object[] columns (same order as findSimilarRaw for consistent mapping):
+     *   [0] id              UUID
+     *   [1] organization_id UUID
+     *   [2] document_id     UUID
+     *   [3] section_title   String (nullable)
+     *   [4] text            String
+     *   [5] chunk_index     Integer
+     *   [6] token_count     Integer (nullable)
+     *   [7] created_at      (skipped in mapping, same as findSimilarRaw)
+     *   [8] distance        Double  ← synthetic: 1.0 - combined_score, so lower = better
+     *                                 Allows reuse of the same Object[] mapping logic.
+     */
+    @Query(value = """
+    SELECT
+        id,
+        organization_id,
+        document_id,
+        section_title,
+        text,
+        chunk_index,
+        token_count,
+        created_at,
+        (1.0 - combined_score) AS distance
+    FROM (
+        SELECT
+            id,
+            organization_id,
+            document_id,
+            section_title,
+            text,
+            chunk_index,
+            token_count,
+            created_at,
+            (
+                (CASE
+                    WHEN embedding IS NOT NULL
+                    THEN (1.0 - (embedding <=> CAST(:embedding AS vector))) * 0.7
+                    ELSE 0.0
+                END)
+                +
+                (CASE
+                    WHEN to_tsvector('english', text) @@ plainto_tsquery('english', :keywords)
+                    THEN ts_rank(to_tsvector('english', text),
+                                 plainto_tsquery('english', :keywords)) * 0.3
+                    ELSE 0.0
+                END)
+            ) AS combined_score
+        FROM document_chunk
+        WHERE organization_id = :orgId
+          AND (
+              (embedding <=> CAST(:embedding AS vector)) < :vectorThreshold
+              OR to_tsvector('english', text) @@ plainto_tsquery('english', :keywords)
+          )
+    ) scored
+    ORDER BY combined_score DESC
+    LIMIT :limit
+    """, nativeQuery = true)
+    List<Object[]> findHybridRaw(
+            @Param("orgId")           UUID   orgId,
+            @Param("embedding")       String embedding,
+            @Param("keywords")        String keywords,
+            @Param("vectorThreshold") double vectorThreshold,
+            @Param("limit")           int    limit
+    );
+
+    /**
+     * Convenience wrapper — maps Object[] rows to DocumentChunk with distance set.
+     * The 'distance' here is (1 - combined_score), so getSimilarity() still works:
+     *   similarity = 1.0 - distance = combined_score
+     * This lets the confidence computation in AnswerGenerationService work unchanged.
+     */
+    default List<DocumentChunk> findHybrid(
+            UUID   orgId,
+            String embedding,
+            String keywords,
+            double vectorThreshold,
+            int    limit
+    ) {
+        // Sanitize keywords for plainto_tsquery — remove special chars that break FTS parsing
+        String safeKeywords = keywords == null || keywords.isBlank()
+                ? "security"
+                : keywords.replaceAll("[^a-zA-Z0-9\\s\\-.]", " ").trim();
+
+        List<Object[]> rows = findHybridRaw(orgId, embedding, safeKeywords, vectorThreshold, limit);
+        return rows.stream()
+                .map(row -> {
+                    DocumentChunk chunk = new DocumentChunk();
+                    chunk.setId(row[0] != null ? UUID.fromString(row[0].toString()) : null);
+                    chunk.setOrganizationId(row[1] != null ? UUID.fromString(row[1].toString()) : null);
+                    chunk.setDocumentId(row[2] != null ? UUID.fromString(row[2].toString()) : null);
+                    chunk.setSectionTitle(row[3] != null ? row[3].toString() : null);
+                    chunk.setText(row[4] != null ? row[4].toString() : "");
+                    chunk.setChunkIndex(row[5] != null ? ((Number) row[5]).intValue() : 0);
+                    chunk.setTokenCount(row[6] != null ? ((Number) row[6]).intValue() : null);
+                    // row[7] = created_at, skipped
+                    // row[8] = (1.0 - combined_score) stored as distance
+                    if (row[8] != null) {
+                        chunk.setDistance(((Number) row[8]).doubleValue());
+                    }
+                    return chunk;
+                })
+                .toList();
+    }
+
+    /**
      * Delete all chunks for a document (used when re-processing or deleting a doc).
      * Unchanged from Phase 3.
      */

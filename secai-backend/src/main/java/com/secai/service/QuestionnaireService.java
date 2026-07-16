@@ -3,9 +3,15 @@ package com.secai.service;
 import com.secai.config.TenantContext;
 import com.secai.domain.questionnaire.*;
 import com.secai.domain.questionnaire.AiGenerationJob.AiJobStatus;
-import com.secai.dto.questionnaire.*;
+import com.secai.dto.questionnaire.QuestionResponse;
+import com.secai.dto.questionnaire.QuestionnaireDetailResponse;
+import com.secai.dto.questionnaire.QuestionnaireListResponse;
+import com.secai.dto.questionnaire.QuestionnaireUploadResponse;
 import com.secai.exception.NotFoundException;
-import com.secai.parsing.*;
+import com.secai.parsing.ParseException;
+import com.secai.parsing.ParseResult;
+import com.secai.parsing.QuestionnaireParser;
+import com.secai.parsing.QuestionnaireParserFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Page;
@@ -15,7 +21,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.util.*;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 @Service
@@ -274,7 +283,9 @@ public class QuestionnaireService {
                 q.getId(), q.getQuestionNumber(), q.getQuestionText(),
                 q.getCategory(), q.getAiAnswer(), q.getEvidence(),
                 q.getRetrievalScore(), q.getStatus(),
-                q.getManualAnswer(), q.getSortOrder()
+                q.getManualAnswer(), q.getSortOrder(),
+                q.getSourceChunkId(),      // NEW
+                q.getSourceDocumentId()    // NEW
         );
     }
 

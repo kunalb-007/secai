@@ -78,7 +78,7 @@ public class LlmService {
         // Build OpenAI-compatible chat request
         ObjectNode body = mapper.createObjectNode();
         body.put("model", chatModel);
-        body.put("max_tokens", 120);  // 50 words ≈ 70 tokens; 120 gives headroom
+        body.put("max_tokens", 150);
         body.put("temperature", 0.0);   // low temp for factual answers
 
         ArrayNode messages = body.putArray("messages");

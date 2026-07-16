@@ -1,6 +1,5 @@
 package com.secai.service;
 
-import com.secai.config.TenantContext;
 import com.secai.domain.coverage.CoverageReport;
 import com.secai.domain.coverage.CoverageReport.CategoryCoverage;
 import com.secai.domain.coverage.CoverageReportRepository;
@@ -12,7 +11,6 @@ import com.secai.dto.coverage.CoverageReportResponse;
 import com.secai.exception.NotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 

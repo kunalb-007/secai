@@ -13,5 +13,7 @@ public record QuestionResponse(
         Double         retrievalScore,
         QuestionStatus status,
         String         manualAnswer,
-        int            sortOrder
+        int            sortOrder,
+        UUID           sourceChunkId,      // NEW — null when no evidence found
+        UUID           sourceDocumentId    // NEW — null when no evidence found
 ) {}

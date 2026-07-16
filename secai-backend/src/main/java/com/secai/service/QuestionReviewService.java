@@ -144,7 +144,9 @@ public class QuestionReviewService {
                 q.getId(), q.getQuestionNumber(), q.getQuestionText(),
                 q.getCategory(), q.getAiAnswer(), q.getEvidence(),
                 q.getRetrievalScore(), q.getStatus(), q.getManualAnswer(),
-                q.getSortOrder()
+                q.getSortOrder(),
+                q.getSourceChunkId(),      // NEW
+                q.getSourceDocumentId()    // NEW
         );
     }
 }
