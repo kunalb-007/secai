@@ -37,12 +37,15 @@ const TIER_BAR_COLOR = {
     CRITICAL: '#ff4d4f',
 };
 
+// AFTER
 function CategoryRow({ cat }) {
+    const [expanded, setExpanded] = useState(false);
+    const hasGaps = cat.unansweredQuestions && cat.unansweredQuestions.length > 0;
+
     return (
-        <div style={{
-            padding: '12px 0',
-            borderBottom: '1px solid #f0f0f0',
-        }}>
+        <div style={{ padding: '12px 0', borderBottom: '1px solid #f0f0f0' }}>
+
+            {/* Header row */}
             <div style={{
                 display: 'flex', justifyContent: 'space-between',
                 alignItems: 'center', marginBottom: 6,
@@ -65,6 +68,8 @@ function CategoryRow({ cat }) {
                     </Text>
                 </Space>
             </div>
+
+            {/* Progress bar */}
             <Progress
                 percent={cat.coveragePercent}
                 strokeColor={TIER_BAR_COLOR[cat.tier]}
@@ -72,10 +77,70 @@ function CategoryRow({ cat }) {
                 showInfo={false}
                 size="small"
             />
+
+            {/* Missing doc suggestion */}
             {cat.missingDocSuggestion && cat.tier !== 'HIGH' && cat.tier !== 'MEDIUM' && (
                 <Text type="secondary" style={{ fontSize: 11, marginTop: 4, display: 'block' }}>
                     📄 Suggested: {cat.missingDocSuggestion}
                 </Text>
+            )}
+
+            {/* Per-question gap list — toggle */}
+            {hasGaps && (
+                <div style={{ marginTop: 6 }}>
+                    <Button
+                        type="link"
+                        size="small"
+                        style={{ padding: 0, fontSize: 11, height: 'auto' }}
+                        onClick={() => setExpanded(e => !e)}
+                    >
+                        {expanded
+                            ? '▲ Hide unanswered questions'
+                            : `▼ Show ${cat.unansweredQuestions.length} unanswered question${cat.unansweredQuestions.length > 1 ? 's' : ''}`}
+                    </Button>
+
+                    {expanded && (
+                        <div style={{ marginTop: 6 }}>
+                            {cat.unansweredQuestions.map((q, i) => (
+                                <div
+                                    key={i}
+                                    style={{
+                                        display:      'flex',
+                                        alignItems:   'flex-start',
+                                        gap:          6,
+                                        padding:      '4px 8px',
+                                        marginBottom: 4,
+                                        background:   cat.tier === 'CRITICAL' ? '#fff2f0' : '#fffbe6',
+                                        borderRadius: 4,
+                                        borderLeft:   `3px solid ${TIER_BAR_COLOR[cat.tier] || '#faad14'}`,
+                                    }}
+                                >
+                                    <ExclamationCircleOutlined
+                                        style={{
+                                            color:     TIER_BAR_COLOR[cat.tier] || '#faad14',
+                                            fontSize:  11,
+                                            marginTop: 2,
+                                            flexShrink: 0,
+                                        }}
+                                    />
+                                    <Text style={{ fontSize: 11, color: '#595959', lineHeight: 1.5 }}>
+                                        {q}
+                                    </Text>
+                                </div>
+                            ))}
+
+                            {/* Suggest doc upload if gap exists */}
+                            {cat.missingDocSuggestion && (
+                                <Text
+                                    type="secondary"
+                                    style={{ fontSize: 11, display: 'block', marginTop: 4 }}
+                                >
+                                    💡 Upload <strong>{cat.missingDocSuggestion}</strong> to close these gaps.
+                                </Text>
+                            )}
+                        </div>
+                    )}
+                </div>
             )}
         </div>
     );
@@ -198,7 +263,7 @@ export default function CoverageAnalysisPage() {
                                 style={{ paddingLeft: 0, marginBottom: 6 }}>
                             Back to Questionnaire
                         </Button>
-                        <Title level={3} style={{ margin: 0 }}>Knowledge Base Coverage</Title>
+                        <Title level={3} style={{ margin: 0 }}>Evidence Gap Analysis</Title>
                         <Text type="secondary">{summary}</Text>
                     </div>
                     <Button icon={<ReloadOutlined />} onClick={handleRefresh} loading={refreshing}>
@@ -278,7 +343,7 @@ export default function CoverageAnalysisPage() {
                         <Card
                             title={
                                 <Space>
-                                    <span>Coverage by Category</span>
+                                    <span>Evidence Gaps by Category</span>
                                     <Tag style={{ fontWeight: 'normal', fontSize: 11 }}>
                                         {categories.length} categories
                                     </Tag>

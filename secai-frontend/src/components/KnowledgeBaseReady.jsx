@@ -77,20 +77,22 @@ function StatBlock({ value, label, icon, color = '#1890ff', animate = true }) {
  * KnowledgeBaseReady
  *
  * Props:
- *   documentCount   number  – Total indexed documents
- *   pageCount       number  – Estimated total pages (optional)
- *   chunkCount      number  – Total indexed chunks
- *   readyCount      number  – Documents with READY status
- *   processingCount number  – Documents still processing
- *   loading         bool    – True while fetching stats
+ *   documentCount    number  – Total indexed documents
+ *   pageCount        number  – Estimated total pages (optional)
+ *   chunkCount       number  – Total indexed chunks
+ *   readyCount       number  – Documents with READY status
+ *   processingCount  number  – Documents still processing
+ *   approvedAnswers  number  – Answers saved to organizational memory (NEW)
+ *   loading          bool    – True while fetching stats
  */
 export default function KnowledgeBaseReady({
-                                               documentCount   = 0,
+                                               documentCount    = 0,
                                                pageCount,
-                                               chunkCount      = 0,
-                                               readyCount      = 0,
-                                               processingCount = 0,
-                                               loading         = false,
+                                               chunkCount       = 0,
+                                               readyCount       = 0,
+                                               processingCount  = 0,
+                                               approvedAnswers  = 0,
+                                               loading          = false,
                                            }) {
     const hasDocuments = documentCount > 0;
     const allReady     = processingCount === 0 && readyCount > 0;
@@ -165,46 +167,75 @@ export default function KnowledgeBaseReady({
                 )}
             </div>
 
+            // AFTER
             {/* ── Stats grid ───────────────────────────────────────────────────── */}
             <Row gutter={0} style={{
-                marginBottom:   20,
-                padding:        '16px 0',
-                borderTop:      '1px solid rgba(0,0,0,0.06)',
-                borderBottom:   '1px solid rgba(0,0,0,0.06)',
+                marginBottom: 20,
+                padding:      '16px 0',
+                borderTop:    '1px solid rgba(0,0,0,0.06)',
+                borderBottom: '1px solid rgba(0,0,0,0.06)',
             }}>
-                <Col span={8} style={{ borderRight: '1px solid rgba(0,0,0,0.06)', paddingRight: 16 }}>
-                    <StatBlock
-                        value={documentCount}
-                        label="Documents"
-                        icon={<FileTextOutlined style={{ color: '#1890ff', fontSize: 18 }} />}
-                        color="#1890ff"
-                    />
-                </Col>
-                {pageCount != null && (
-                    <Col span={8} style={{
-                        borderRight:  '1px solid rgba(0,0,0,0.06)',
-                        paddingLeft:  16,
-                        paddingRight: 16,
-                    }}>
-                        <StatBlock
-                            value={pageCount}
-                            label="Pages Processed"
-                            icon={<span style={{ fontSize: 18 }}>📄</span>}
-                            color="#722ed1"
-                        />
-                    </Col>
-                )}
-                <Col span={pageCount != null ? 8 : 16} style={{ paddingLeft: 16 }}>
-                    <StatBlock
-                        value={chunkCount}
-                        label="Knowledge Chunks"
-                        icon={<DatabaseOutlined style={{ color: '#52c41a', fontSize: 18 }} />}
-                        color="#52c41a"
-                    />
-                </Col>
+                {/* Column widths: 3 cols → 8 each; 4 cols when approvedAnswers > 0 → 6 each */}
+                {(() => {
+                    const showApproved = approvedAnswers > 0;
+                    const colSpan      = showApproved ? 6 : 8;
+                    const divider      = { borderRight: '1px solid rgba(0,0,0,0.06)' };
+                    return (
+                        <>
+                            <Col span={colSpan} style={{ ...divider, paddingRight: 16 }}>
+                                <StatBlock
+                                    value={documentCount}
+                                    label="Documents"
+                                    icon={<FileTextOutlined style={{ color: '#1890ff', fontSize: 18 }} />}
+                                    color="#1890ff"
+                                />
+                            </Col>
+
+                            {pageCount != null && (
+                                <Col span={colSpan} style={{ ...divider, paddingLeft: 16, paddingRight: 16 }}>
+                                    <StatBlock
+                                        value={pageCount}
+                                        label="Pages Processed"
+                                        icon={<span style={{ fontSize: 18 }}>📄</span>}
+                                        color="#722ed1"
+                                    />
+                                </Col>
+                            )}
+
+                            <Col
+                                span={colSpan}
+                                style={{
+                                    paddingLeft:  16,
+                                    paddingRight: showApproved ? 16 : 0,
+                                    ...(showApproved ? divider : {}),
+                                }}
+                            >
+                                <StatBlock
+                                    value={chunkCount}
+                                    label="Knowledge Chunks"
+                                    icon={<DatabaseOutlined style={{ color: '#52c41a', fontSize: 18 }} />}
+                                    color="#52c41a"
+                                />
+                            </Col>
+
+                            {/* NEW — only shown once organisation has built up memory */}
+                            {showApproved && (
+                                <Col span={colSpan} style={{ paddingLeft: 16 }}>
+                                    <StatBlock
+                                        value={approvedAnswers}
+                                        label="Security Memory"
+                                        icon={<span style={{ fontSize: 18 }}>🧠</span>}
+                                        color="#eb2f96"
+                                    />
+                                </Col>
+                            )}
+                        </>
+                    );
+                })()}
             </Row>
 
             {/* ── Ready state message ───────────────────────────────────────────── */}
+            // AFTER
             {allReady && (
                 <div style={{
                     display:      'flex',
@@ -222,8 +253,10 @@ export default function KnowledgeBaseReady({
                             Ready for questionnaires
                         </Text>
                         <Text type="secondary" style={{ fontSize: 12 }}>
-                            The AI can now search {chunkCount.toLocaleString()} knowledge chunks
-                            to answer security questionnaires.
+                            {approvedAnswers > 0
+                                ? `The AI can search ${chunkCount.toLocaleString()} knowledge chunks and reuse ${approvedAnswers.toLocaleString()} approved answers from organizational security memory.`
+                                : `The AI can now search ${chunkCount.toLocaleString()} knowledge chunks to answer security questionnaires.`
+                            }
                         </Text>
                     </div>
                 </div>

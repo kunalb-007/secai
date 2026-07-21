@@ -77,5 +77,6 @@ public class CoverageReport {
         private int     answerableQuestions;
         private String  missingDocSuggestion; // nullable
         private String  coverageTier;        // HIGH | MEDIUM | LOW | CRITICAL
+        private List<String> unansweredQuestions;
     }
 }

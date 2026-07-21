@@ -37,13 +37,9 @@ public class ChunkController {
     public ResponseEntity<ChunkSourceResponse> getChunk(@PathVariable UUID id) {
         UUID orgId = TenantContext.get();
 
-        DocumentChunk chunk = chunkRepo.findById(id)
+        DocumentChunk chunk =
+                chunkRepo.findByIdAndOrganizationId(id, orgId)
                 .orElseThrow(() -> new NotFoundException("Chunk not found"));
-
-        // Tenant isolation check — never expose another org's document text
-        if (!orgId.equals(chunk.getOrganizationId())) {
-            throw new ForbiddenException("Access denied");
-        }
 
         Document doc = documentRepo.findByIdAndOrganizationId(chunk.getDocumentId(), orgId)
                 .orElseThrow(() -> new NotFoundException("Document not found"));

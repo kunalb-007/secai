@@ -13,11 +13,27 @@ import java.net.http.*;
 import java.time.Duration;
 
 /**
- * Calls the GitHub Models OpenAI-compatible chat completion endpoint.
- * Drop-in replacement for OpenAI — same request/response format.
+ * Calls any OpenAI-compatible chat completion endpoint.
  *
- * Switch back to real OpenAI: change base-url in application.yml to
- * https://api.openai.com/v1 and set OPENAI_API_KEY env var.
+ * Supports three backends via application.yml:
+ *
+ *   1. GitHub Models (default for dev/staging):
+ *      base-url: https://models.inference.ai.azure.com
+ *      api-key:  ${GITHUB_TOKEN}
+ *      chat-model: gpt-4o-mini
+ *
+ *   2. Ollama local (for local testing without API costs):
+ *      base-url: http://localhost:11434/v1
+ *      api-key:  ollama          ← Ollama ignores the key but the header must be present
+ *      chat-model: qwen2.5:7b
+ *
+ *   3. OpenAI (for production):
+ *      base-url: https://api.openai.com/v1
+ *      api-key:  ${OPENAI_API_KEY}
+ *      chat-model: gpt-4o-mini
+ *
+ * Switch between them by changing application.yml or setting env vars —
+ * no code changes required.
  */
 @Service
 public class LlmService {
@@ -27,28 +43,40 @@ public class LlmService {
     private final String     apiKey;
     private final String     chatModel;
     private final String     baseUrl;
+    private final int        timeoutSeconds;
     private final HttpClient httpClient;
     private final ObjectMapper mapper;
 
     public LlmService(
-            @Value("${app.openai.api-key}")    String apiKey,
-            @Value("${app.openai.chat-model}") String chatModel,
-            @Value("${app.openai.base-url}")   String baseUrl
+            @Value("${app.openai.api-key}")              String apiKey,
+            @Value("${app.openai.chat-model}")           String chatModel,
+            @Value("${app.openai.base-url}")             String baseUrl,
+            /**
+             * Timeout in seconds for a single LLM completion call.
+             *
+             * Why configurable:
+             *   - OpenAI/GitHub Models: 30s is plenty (server-side GPU, fast inference)
+             *   - Ollama local on RTX 3050: first call loads model (~20s) + generates (~10s)
+             *     = up to 120s. Subsequent calls are faster (~7-10s for 150 tokens).
+             *   Set in application.yml per profile. Default 30s keeps prod behaviour unchanged.
+             */
+            @Value("${app.openai.timeout-seconds:30}")   int timeoutSeconds
     ) {
-        this.apiKey     = apiKey;
-        this.chatModel  = chatModel;
-        this.baseUrl    = baseUrl;
-        this.httpClient = HttpClient.newBuilder()
+        this.apiKey         = apiKey;
+        this.chatModel      = chatModel;
+        this.baseUrl        = baseUrl;
+        this.timeoutSeconds = timeoutSeconds;
+        this.httpClient     = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
         this.mapper = new ObjectMapper();
     }
 
     /**
-     * Send a single prompt to the chat model, get back the text response.
+     * Send a single prompt to the configured chat model.
      *
-     * @param systemPrompt  The system context (instructions for the AI)
-     * @param userMessage   The user message (the actual question + context)
+     * @param systemPrompt  System-level instructions
+     * @param userMessage   The user message containing context + question
      * @return              The model's text response
      */
     public String complete(String systemPrompt, String userMessage) {
@@ -75,11 +103,14 @@ public class LlmService {
     }
 
     private String callChatApi(String systemPrompt, String userMessage) throws Exception {
-        // Build OpenAI-compatible chat request
         ObjectNode body = mapper.createObjectNode();
         body.put("model", chatModel);
         body.put("max_tokens", 150);
-        body.put("temperature", 0.0);   // low temp for factual answers
+        body.put("temperature", 0.0);
+
+        // Ollama-specific: set stream=false explicitly to get a single JSON response.
+        // OpenAI ignores this field when not streaming, so it's safe for all backends.
+        body.put("stream", false);
 
         ArrayNode messages = body.putArray("messages");
 
@@ -97,34 +128,49 @@ public class LlmService {
                 .uri(URI.create(baseUrl + "/chat/completions"))
                 .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "application/json")
-                .timeout(Duration.ofSeconds(30))
+                // Use the configurable timeout — critical for Ollama which loads the model
+                // on first request. 30s default for cloud APIs, 120s for local Ollama.
+                .timeout(Duration.ofSeconds(timeoutSeconds))
                 .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(body)))
                 .build();
 
-        log.info("Calling chat completion API using model {}",
-                chatModel);
+        log.info("Calling {} via {}", chatModel, baseUrl);
 
-        HttpResponse<String> response = httpClient.send(request,
-                HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = httpClient.send(
+                request, HttpResponse.BodyHandlers.ofString());
 
         if (response.statusCode() == 429) {
-            throw new RateLimitException("GitHub Models rate limit hit");
+            throw new RateLimitException("Rate limit hit");
         }
         if (response.statusCode() != 200) {
             throw new RuntimeException(
-                    "Chat API returned " + response.statusCode() + ": " + response.body()
+                    "Chat API returned HTTP " + response.statusCode()
+                            + ". Body: " + response.body().substring(0, Math.min(200, response.body().length()))
             );
         }
 
         JsonNode json = mapper.readTree(response.body());
-        String content = json
-                .path("choices").get(0)
+
+        // Guard against malformed responses — both OpenAI and Ollama should always
+        // return choices[0].message.content, but defensive parsing prevents NPE.
+        JsonNode choices = json.path("choices");
+        if (!choices.isArray() || choices.isEmpty()) {
+            throw new RuntimeException(
+                    "LLM returned no choices. Full response: "
+                            + response.body().substring(0, Math.min(500, response.body().length()))
+            );
+        }
+
+        String content = choices.get(0)
                 .path("message")
                 .path("content")
                 .asText("");
 
-        log.info("Received chat completion response");
+        if (content.isBlank()) {
+            throw new RuntimeException("LLM returned empty content in choices[0].message.content");
+        }
 
+        log.info("LLM response received ({} chars)", content.length());
         return content;
     }
 
@@ -133,6 +179,10 @@ public class LlmService {
     }
 
     private void sleepMs(long ms) {
-        try { Thread.sleep(ms); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 }

@@ -6,13 +6,13 @@ import com.secai.domain.questionnaire.*;
 import com.secai.domain.questionnaire.AiGenerationJob.AiJobStatus;
 import com.secai.exception.NotFoundException;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.OffsetDateTime;
-import java.util.List;
-import java.util.UUID;
+import java.util.*;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -20,41 +20,46 @@ import java.util.stream.Collectors;
 public class AnswerGenerationService {
 
     // ── Retrieval config ──────────────────────────────────────────────────────
-    /**
-     * Cosine distance threshold for vector search.
-     * 0.35 distance ≈ 0.65 cosine similarity — deliberately loose so hybrid
-     * scoring can surface keyword-match chunks even with lower semantic score.
-     */
-    private static final double VECTOR_THRESHOLD  = 0.35;
+
+    // With small corpora (6–30 chunks covering many topics), a single chunk
+// covers multiple security domains. The cosine distance between a question
+// about "MFA" and a chunk covering auth + passwords + MFA is typically
+// 0.38–0.50 — comfortably over the old 0.35 cutoff.
+// The hybrid reranker (FTS branch + combined scoring) handles false positives.
+    private static final double VECTOR_THRESHOLD = 0.55;
 
     /**
-     * Retrieve top 5 candidates (up from 3).
-     * Rationale: multi-part security questions (encryption + key management +
-     * data retention) need evidence from different sections. Top-3 missed one.
-     * Top-5 with 800 chars each = ~1000 tokens context — well within GPT-4o-mini limits.
+     * RAISED from 5 → 7.
+     *
+     * Rationale: multi-part security questions often need evidence from
+     * different sections (e.g. "Do you have MFA and access reviews?" spans
+     * two sections). Top-5 was sometimes missing the second piece of evidence.
+     * Top-7 with 800-char context cap ≈ 1,400 tokens — within GPT-4o-mini limits.
      */
-    private static final int TOP_K = 5;
+    private static final int TOP_K = 7;
 
-    private static final int MAX_CONTEXT_CHARS = 800;
+    // 300 tokens × ~4.5 chars/token = ~1350 chars.
+// Set to 1500 to never truncate a standard chunk while still bounding
+// runaway chunks from the paragraph-fallback path.
+    private static final int MAX_CONTEXT_CHARS = 1500;
 
-    // ── Confidence penalties ──────────────────────────────────────────────────
-    private static final double PENALTY_FEW_CHUNKS     = 0.7;
-    private static final double PENALTY_SOME_CHUNKS    = 0.9;
-    private static final double LOW_CONFIDENCE_CEILING = 0.15;
+//    // ── Confidence penalties ──────────────────────────────────────────────────
+//    private static final double PENALTY_FEW_CHUNKS     = 0.7;
+//    private static final double PENALTY_SOME_CHUNKS    = 0.9;
+//    private static final double LOW_CONFIDENCE_CEILING = 0.15;
 
-    private final QuestionRepository           questionRepo;
-    private final AiGenerationJobRepository    jobRepo;
-    private final QuestionnaireRepository      questionnaireRepo;
-    private final DocumentChunkRepository      chunkRepo;
-    private final EmbeddingService             embeddingService;
-    private final LlmService                   llmService;
-    private final AnswerGenerationAsyncRunner  asyncRunner;
-    /**
-     * Used for the short save-only transaction in generateAnswer().
-     * Replaces the broad @Transactional that was holding a DB connection
-     * open during 1-3 second LLM API calls.
-     */
-    private final TransactionTemplate          txTemplate;
+    // Maximum confidence allowed when the LLM explicitly says there is
+// insufficient evidence in the uploaded documentation.
+    private static final double LOW_CONFIDENCE_CEILING = 0.45;
+
+    private final QuestionRepository          questionRepo;
+    private final AiGenerationJobRepository   jobRepo;
+    private final QuestionnaireRepository     questionnaireRepo;
+    private final DocumentChunkRepository     chunkRepo;
+    private final EmbeddingService            embeddingService;
+    private final LlmService                  llmService;
+    private final AnswerGenerationAsyncRunner asyncRunner;
+    private final TransactionTemplate         txTemplate;
 
     public AnswerGenerationService(
             QuestionRepository          questionRepo,
@@ -63,7 +68,7 @@ public class AnswerGenerationService {
             DocumentChunkRepository     chunkRepo,
             EmbeddingService            embeddingService,
             LlmService                  llmService,
-            AnswerGenerationAsyncRunner asyncRunner,
+            @Lazy AnswerGenerationAsyncRunner asyncRunner,
             TransactionTemplate         txTemplate
     ) {
         this.questionRepo      = questionRepo;
@@ -98,9 +103,7 @@ public class AnswerGenerationService {
         }
 
         long total = questionRepo.countByQuestionnaireIdAndOrganizationId(questionnaireId, orgId);
-        if (total == 0) {
-            throw new IllegalStateException("No questions found in this questionnaire.");
-        }
+        if (total == 0) throw new IllegalStateException("No questions found.");
 
         job.setStatus(AiJobStatus.RUNNING);
         job.setTotalQuestions((int) total);
@@ -114,33 +117,31 @@ public class AnswerGenerationService {
 
         log.info("[{}] Dispatching async generation for {} questions", questionnaireId, total);
         asyncRunner.runAsync(job.getId(), questionnaireId, orgId);
-
         return job;
     }
 
     // ── Per-question RAG pipeline ─────────────────────────────────────────────
 
-    /**
-     * Full RAG pipeline for one question.
-     *
-     * Transaction boundary fix: @Transactional is intentionally REMOVED.
-     * The old approach held a DB connection open for the full duration including:
-     *   - OpenAI embedding call (~200ms)
-     *   - pgvector search (~10ms)
-     *   - OpenAI LLM call (~1-3s)
-     * With 400 questions and HikariCP's default pool of 10, this caused
-     * connection pool exhaustion. Now only the final save opens a transaction.
-     */
     public void generateAnswer(Question question, UUID orgId) {
-        // ── Step 1: Embed question (no DB connection held) ────────────────────
-        float[] embedding     = embeddingService.embed(question.getQuestionText());
-        String  embeddingStr  = embeddingService.toVectorString(embedding);
 
-        // Extract keywords from the question for FTS.
-        // plainto_tsquery handles multi-word phrases safely.
+        // ── Step 1: Build normalised query ────────────────────────────────────
+        // Expand synonyms BEFORE embedding so the vector is semantically broader.
+        // E.g. "Is MFA enforced?" → "Is MFA enforced? multi-factor authentication
+        //      required enabled mandatory" — the extra terms pull the embedding
+        // centroid toward the dense auth/access-control region of the vector space.
+        String normalizedQuestion = normalizeQuery(question.getQuestionText());
+
+        // ── Step 2: Embed the normalised question ─────────────────────────────
+        float[] embedding    = embeddingService.embed(normalizedQuestion);
+        String  embeddingStr = embeddingService.toVectorString(embedding);
+
+        // ── Step 3: Build FTS keyword string ─────────────────────────────────
+        // Extract the core keywords for plainto_tsquery.
+        // We use the ORIGINAL question (not the expanded one) for FTS because
+        // the extra synonym terms would generate too many false FTS matches.
         String keywords = extractKeywords(question.getQuestionText());
 
-        // ── Step 2: Hybrid search (vector + keyword) ──────────────────────────
+        // ── Step 4: Hybrid search ─────────────────────────────────────────────
         List<DocumentChunk> chunks = chunkRepo.findHybrid(
                 orgId, embeddingStr, keywords, VECTOR_THRESHOLD, TOP_K
         );
@@ -148,34 +149,53 @@ public class AnswerGenerationService {
         log.info("[question:{}] Hybrid search returned {} chunks (keywords: '{}')",
                 question.getId(), chunks.size(), keywords);
 
-        // ── Step 3: Build context (no DB connection held) ─────────────────────
+        for (int i = 0; i < chunks.size(); i++) {
+            DocumentChunk c = chunks.get(i);
+
+            log.info("""
+        Rank {}
+        Doc={}
+        Section={}
+        Similarity={}
+        Text={}
+        """,
+                    i + 1,
+                    c.getDocumentId(),
+                    c.getSectionTitle(),
+                    c.getSimilarity(),
+                    c.getText().substring(0, Math.min(120, c.getText().length()))
+            );
+        }
+
+        // ── Step 5: Build context ─────────────────────────────────────────────
         String context = buildContext(chunks);
 
-        // ── Step 4: LLM call (no DB connection held) ──────────────────────────
-        String llmResponse = llmService.complete(buildSystemPrompt(), buildUserMessage(context, question.getQuestionText()));
+        // ── Step 6: LLM call ─────────────────────────────────────────────────
+        // Use the ORIGINAL question in the prompt — the LLM needs the real question,
+        // not the synonym-expanded version.
+        String llmResponse = llmService.complete(
+                buildSystemPrompt(),
+                buildUserMessage(context, question.getQuestionText())
+        );
 
-        // ── Step 5: Parse response (no DB connection held) ───────────────────
-        String answer   = extractAnswer(llmResponse);
-        String evidence = extractEvidence(llmResponse);
+        // ── Step 7: Parse response ────────────────────────────────────────────
+        String answer     = extractAnswer(llmResponse);
+        String evidence   = extractEvidence(llmResponse);
         double confidence = computeConfidence(chunks, answer);
 
-        // ── Step 6: Identify best source chunk for "View Source" ──────────────
-        // The first chunk in the list has the highest combined score.
         UUID sourceChunkId    = chunks.isEmpty() ? null : chunks.get(0).getId();
         UUID sourceDocumentId = chunks.isEmpty() ? null : chunks.get(0).getDocumentId();
 
-        // ── Step 7: Short-lived transaction only for the DB write ─────────────
-        final String  finalAnswer        = answer.trim();
-        final String  finalEvidence      = evidence.trim();
-        final double  finalConfidence    = confidence;
-        final UUID    finalChunkId       = sourceChunkId;
-        final UUID    finalDocumentId    = sourceDocumentId;
+        // ── Step 8: Save in a short-lived transaction ─────────────────────────
+        final String finalAnswer      = answer.trim();
+        final String finalEvidence    = evidence.trim();
+        final double finalConfidence  = confidence;
+        final UUID   finalChunkId     = sourceChunkId;
+        final UUID   finalDocumentId  = sourceDocumentId;
 
         txTemplate.execute(tx -> {
-            // Re-fetch inside transaction to avoid stale state
             Question q = questionRepo.findById(question.getId()).orElse(null);
             if (q == null) return null;
-
             q.setAiAnswer(finalAnswer);
             q.setEvidence(finalEvidence);
             q.setRetrievalScore(finalConfidence);
@@ -185,8 +205,11 @@ public class AnswerGenerationService {
             return questionRepo.save(q);
         });
 
-        log.info("[question:{}] Saved. confidence={:.2f} sourceChunk={}",
-                question.getId(), confidence, sourceChunkId);
+        log.info("[question:{}] Saved. confidence={} sourceChunk={} chunks={}",
+                question.getId(),
+                String.format("%.2f", confidence),
+                String.format("%.2f", chunks.isEmpty() ? 0.0 : chunks.get(0).getSimilarity()),
+                chunks.size());
     }
 
     @Transactional
@@ -200,6 +223,195 @@ public class AnswerGenerationService {
         questionRepo.save(question);
     }
 
+    // ── Query normalisation ───────────────────────────────────────────────────
+
+    /**
+     * Expands security questionnaire questions with synonyms before embedding.
+     *
+     * WHY THIS IS NEEDED:
+     * Security questionnaires use highly variable phrasing for identical concepts.
+     * "Is MFA enforced?" and "Do you require multi-factor authentication?" are
+     * semantically identical but their embeddings can be 0.30–0.45 cosine distance
+     * apart — enough to miss retrieval at a 0.35 threshold.
+     *
+     * HOW IT WORKS:
+     * We append a synonym expansion string after the original question.
+     * The embedding model averages across the full input, pulling the vector
+     * toward the centroid of all the synonym meanings.
+     * The LLM receives only the ORIGINAL question (see buildUserMessage).
+     *
+     * SYNONYM GROUPS (tuned for common security questionnaire patterns):
+     * Each group maps one "question word" to the set of equivalent terms
+     * used in security documentation (policies, SOC 2 reports, etc.).
+     */
+    private String normalizeQuery(String questionText) {
+        if (questionText == null || questionText.isBlank()) return questionText;
+
+        String lower = questionText.toLowerCase();
+        List<String> expansions = new ArrayList<>();
+
+        // ── Authentication / Access control ───────────────────────────────────
+        if (matches(lower, "mfa", "multi-factor", "two-factor", "2fa", "2-factor")) {
+            expansions.add("multi-factor authentication MFA two-factor authentication 2FA required mandatory enabled");
+        }
+        if (matches(lower, "sso", "single sign-on", "identity provider", "idp", "saml", "oauth", "oidc")) {
+            expansions.add("single sign-on SSO identity provider IdP SAML OAuth OIDC authentication");
+        }
+        if (matches(lower, "password", "passphrase", "credential")) {
+            expansions.add("password passphrase credential minimum length complexity policy");
+        }
+        if (matches(lower, "access review", "access recertification", "user review", "periodic review", "quarterly review", "annual review")) {
+            expansions.add("access review recertification user access rights periodic quarterly annual review revoke");
+        }
+        if (matches(lower, "privileged", "admin", "superuser", "root access")) {
+            expansions.add("privileged access administrator superuser root service account just-in-time PAM");
+        }
+        if (matches(lower, "rbac", "role-based", "least privilege", "need to know")) {
+            expansions.add("role-based access control RBAC least privilege need-to-know permissions");
+        }
+
+        // ── Encryption ────────────────────────────────────────────────────────
+        if (matches(lower, "encrypt", "encryption", "cipher", "aes", "tls", "ssl")) {
+            expansions.add("encryption AES-256 TLS 1.2 TLS 1.3 SSL cipher data protection in transit at rest");
+        }
+        if (matches(lower, "key management", "key rotation", "kms", "hsm")) {
+            expansions.add("encryption key management rotation KMS HSM key lifecycle AWS KMS");
+        }
+        if (matches(lower, "tls", "ssl", "https", "in transit", "transport")) {
+            expansions.add("TLS 1.2 TLS 1.3 SSL HTTPS transport encryption in transit mutual TLS");
+        }
+        if (matches(lower, "data at rest", "disk encryption", "storage encryption", "database encryption")) {
+            expansions.add("data at rest encryption disk AES-256 encrypted database storage volumes");
+        }
+
+        // ── Logging / Monitoring ──────────────────────────────────────────────
+        if (matches(lower, "log", "logging", "audit trail", "audit log", "event log")) {
+            expansions.add("logging audit trail log retention SIEM event monitoring centralized");
+        }
+        if (matches(lower, "log retention", "retain log", "how long", "retention period")) {
+            expansions.add("log retention period days months years audit trail storage compliance");
+        }
+        if (matches(lower, "alert", "alerting", "notification", "failed login", "intrusion")) {
+            expansions.add("alerting notification SIEM anomaly detection failed login brute force intrusion");
+        }
+        if (matches(lower, "siem", "security information", "event management", "splunk", "elk")) {
+            expansions.add("SIEM security information event management log aggregation Splunk ELK monitoring");
+        }
+
+        // ── Vulnerability / Penetration testing ───────────────────────────────
+        if (matches(lower, "penetration test", "pentest", "pen test", "red team")) {
+            expansions.add("penetration testing pentest annual third-party red team vulnerability assessment scope");
+        }
+        if (matches(lower, "vulnerability", "cve", "scan", "patch", "remediat")) {
+            expansions.add("vulnerability management scanning patching CVE CVSS remediation SLA critical high");
+        }
+        if (matches(lower, "sast", "dast", "static analysis", "dynamic analysis", "code scan")) {
+            expansions.add("SAST DAST static dynamic code analysis security scanning pipeline CI/CD");
+        }
+
+        // ── Backup / Recovery ─────────────────────────────────────────────────
+        if (matches(lower, "backup", "back up", "restore", "recovery")) {
+            expansions.add("backup recovery restore encrypted offsite retention tested RTO RPO");
+        }
+        if (matches(lower, "rto", "recovery time objective", "rpo", "recovery point objective")) {
+            expansions.add("RTO recovery time objective RPO recovery point objective SLA availability disaster");
+        }
+        if (matches(lower, "disaster recovery", "business continuity", "bcp", "drp")) {
+            expansions.add("disaster recovery business continuity plan BCP DRP failover resilience");
+        }
+
+        // ── Infrastructure / Cloud ────────────────────────────────────────────
+        if (matches(lower, "cloud provider", "cloud hosting", "aws", "azure", "gcp", "google cloud")) {
+            expansions.add("cloud provider AWS Azure GCP Amazon Web Services hosting infrastructure region");
+        }
+        if (matches(lower, "secret", "api key", "credentials", "vault", "secret management")) {
+            expansions.add("secret management API key credentials vault HashiCorp rotation environment variable");
+        }
+
+        // ── SDLC / Development ────────────────────────────────────────────────
+        if (matches(lower, "pull request", "code review", "peer review", "merge", "branch")) {
+            expansions.add("pull request code review peer review merge branch approval SDLC");
+        }
+
+        // ── Physical security ─────────────────────────────────────────────────
+        if (matches(lower, "visitor", "physical access", "data center", "badge", "cctv")) {
+            expansions.add("visitor registration physical access data center badge CCTV camera log escort");
+        }
+
+        // ── Compliance / Risk ─────────────────────────────────────────────────
+        if (matches(lower, "compliance", "framework", "iso 27001", "soc 2", "nist", "gdpr", "hipaa", "pci")) {
+            expansions.add("compliance framework ISO 27001 SOC 2 NIST GDPR HIPAA PCI-DSS certification audit");
+        }
+        if (matches(lower, "risk assessment", "risk management", "risk register")) {
+            expansions.add("risk assessment risk management risk register annual threat model impact likelihood");
+        }
+
+        // ── Training / HR ─────────────────────────────────────────────────────
+        if (matches(lower, "security training", "security awareness", "phishing", "annual training")) {
+            expansions.add("security awareness training annual phishing simulation onboarding policy acknowledgement");
+        }
+        if (matches(lower, "vendor", "third party", "supplier", "sub-processor", "fourth party")) {
+            expansions.add("vendor third-party supplier risk assessment annual review contract DPA sub-processor");
+        }
+
+        // ── Time period synonyms (catches "annually" vs "yearly" etc.) ────────
+        if (matches(lower, "annual", "annually", "yearly", "once a year", "per year")) {
+            expansions.add("annual annually yearly once a year periodic frequency");
+        }
+        if (matches(lower, "quarter", "quarterly", "every 3 months", "periodically")) {
+            expansions.add("quarterly periodically regular schedule frequency review");
+        }
+
+        // ── Boolean / enforcement synonyms ────────────────────────────────────
+        if (matches(lower, "enforced", "required", "mandatory", "must", "compulsory")) {
+            expansions.add("enforced required mandatory enabled configured policy required");
+        }
+        if (matches(lower, "enabled", "active", "in place", "implemented", "deployed")) {
+            expansions.add("enabled active implemented deployed configured in place enforced");
+        }
+
+        if (expansions.isEmpty()) {
+            return questionText; // no expansion needed
+        }
+
+        // Append expansions as a separate line so the embedding model
+        // treats them as supplementary context, not part of the question.
+        return questionText + "\n" + String.join(" ", expansions);
+    }
+
+    /**
+     * Returns true if the text contains ANY of the given terms (case-insensitive).
+     */
+    private boolean matches(String lowerText, String... terms) {
+        for (String term : terms) {
+            if (lowerText.contains(term.toLowerCase())) return true;
+        }
+        return false;
+    }
+
+    // ── Keyword extraction for FTS ────────────────────────────────────────────
+
+    /**
+     * Extracts keywords from the ORIGINAL (non-expanded) question for FTS.
+     *
+     * plainto_tsquery handles stop words, stemming, and tokenization automatically.
+     * We just need to pass a clean string. The full question works well.
+     * Cap at 200 chars to avoid passing absurdly long strings to the FTS parser.
+     */
+    private String extractKeywords(String questionText) {
+        if (questionText == null || questionText.isBlank()) return "security";
+
+        // Keep alphanumeric, spaces, hyphens, dots, slashes, and colons.
+        // Slashes and colons appear in security terms: "AES-256/GCM", "TLS 1.3", "SHA-256".
+        // The downstream sanitizer in findHybrid() removes anything that breaks plainto_tsquery.
+        String cleaned = questionText
+                .replaceAll("[^a-zA-Z0-9\\s\\-./:]", " ")
+                .replaceAll("\\s{2,}", " ")
+                .trim();
+
+        return cleaned.length() > 250 ? cleaned.substring(0, 250) : cleaned;
+    }
+
     // ── Context builder ───────────────────────────────────────────────────────
 
     private String trimChunk(String text) {
@@ -207,30 +419,31 @@ public class AnswerGenerationService {
         return text.length() <= MAX_CONTEXT_CHARS ? text : text.substring(0, MAX_CONTEXT_CHARS);
     }
 
+    // AFTER
     private String buildContext(List<DocumentChunk> chunks) {
         if (chunks.isEmpty()) return "No relevant documentation found.";
-        return chunks.stream()
-                .map(c -> String.format("[%s]\n%s",
-                        c.getSectionTitle() != null ? c.getSectionTitle() : "Document",
-                        trimChunk(c.getText())))
-                .collect(Collectors.joining("\n\n---\n\n"));
+        // Include rank so the LLM can weight the most relevant chunk higher.
+        // Only include chunks above a minimum combined_score to avoid injecting
+        // noise from the bottom of the TOP_K list when the corpus is small.
+        List<DocumentChunk> usable = chunks.stream()
+                .filter(c -> c.getSimilarity() >= 0.15)
+                .toList();
+        if (usable.isEmpty()) usable = chunks.subList(0, 1); // always keep at least one
+
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < usable.size(); i++) {
+            DocumentChunk c = usable.get(i);
+            if (i > 0) sb.append("\n\n---\n\n");
+            sb.append(String.format("[Source %d | %s]\n%s",
+                    i + 1,
+                    c.getSectionTitle() != null ? c.getSectionTitle() : "Document",
+                    trimChunk(c.getText())));
+        }
+        return sb.toString();
     }
 
-    // ── Prompt: few-shot system prompt ────────────────────────────────────────
+    // ── Prompts ───────────────────────────────────────────────────────────────
 
-    /**
-     * Few-shot system prompt with 2 worked examples.
-     *
-     * Why few-shot:
-     * - Zero-shot answers often add preamble ("Based on the context provided...")
-     *   which wastes tokens and sounds like a chatbot, not a security professional.
-     * - The examples teach the LLM the exact compliance voice customers expect.
-     * - Both examples cover the two main answer patterns: Yes/confirmed and procedural.
-     *
-     * Token cost: ~180 tokens per question vs ~80 before = ~100 extra tokens.
-     * At 400 questions: 40,000 extra input tokens ≈ $0.006 at GPT-4o-mini pricing.
-     * Negligible cost for meaningfully better output quality.
-     */
     private String buildSystemPrompt() {
         return """
 You answer security questionnaires using ONLY the provided context. Never use outside knowledge.
@@ -269,69 +482,91 @@ Rules:
         return "Context:\n" + context + "\n\nQuestion: " + questionText;
     }
 
-    // ── Keyword extraction for FTS ─────────────────────────────────────────────
-
-    /**
-     * Extracts meaningful keywords from the question for PostgreSQL plainto_tsquery.
-     *
-     * plainto_tsquery handles the input safely — it tokenizes, stems, and
-     * removes stop words. We just need to pass meaningful terms, not a perfect query.
-     *
-     * We preserve the full question text since plainto_tsquery will do the right thing.
-     * Short trimming ensures we don't pass absurdly long strings.
-     */
-    private String extractKeywords(String questionText) {
-        if (questionText == null || questionText.isBlank()) return "security";
-        // plainto_tsquery handles full sentences well — just cap the length
-        return questionText.length() > 200
-                ? questionText.substring(0, 200)
-                : questionText;
-    }
-
     // ── Response parsing ──────────────────────────────────────────────────────
 
     private String extractAnswer(String response) {
         if (response == null || response.isBlank()) return "Unable to generate answer.";
-        String normalized = response.replace("\r\n", "\n").replace("\r", "\n");
-        int answerIdx   = normalized.toLowerCase().indexOf("answer:");
-        int evidenceIdx = normalized.toLowerCase().indexOf("evidence:");
-        if (answerIdx == -1) return normalized.trim();
-        int start = answerIdx + "answer:".length();
-        if (evidenceIdx > answerIdx) return normalized.substring(start, evidenceIdx).strip();
-        return normalized.substring(start).strip();
+        String n = response.replace("\r\n", "\n").replace("\r", "\n");
+        int ai = n.toLowerCase().indexOf("answer:");
+        int ei = n.toLowerCase().indexOf("evidence:");
+        if (ai == -1) return n.trim();
+        int start = ai + "answer:".length();
+        if (ei > ai) return n.substring(start, ei).strip();
+        return n.substring(start).strip();
     }
 
     private String extractEvidence(String response) {
         if (response == null || response.isBlank()) return "N/A";
-        String normalized = response.replace("\r\n", "\n").replace("\r", "\n");
-        int idx = normalized.toLowerCase().indexOf("evidence:");
+        String n = response.replace("\r\n", "\n").replace("\r", "\n");
+        int idx = n.toLowerCase().indexOf("evidence:");
         if (idx == -1) return "N/A";
-        String evidence = normalized.substring(idx + "evidence:".length()).strip();
-        int newline = evidence.indexOf('\n');
-        if (newline > 0) evidence = evidence.substring(0, newline).strip();
-        return evidence.isBlank() ? "N/A" : evidence;
+        String e = n.substring(idx + "evidence:".length()).strip();
+        int nl = e.indexOf('\n');
+        if (nl > 0) e = e.substring(0, nl).strip();
+        return e.isBlank() ? "N/A" : e;
     }
 
     // ── Confidence scoring ────────────────────────────────────────────────────
 
-    /**
-     * Retrieval-based confidence. Uses the combined hybrid score stored as
-     * getSimilarity() on the top chunk (similarity = 1.0 - distance,
-     * where distance = 1.0 - combined_score from the hybrid query).
-     */
+    // AFTER
     private double computeConfidence(List<DocumentChunk> chunks, String answer) {
-        if (chunks.isEmpty()) return 0.05;
-        double confidence = chunks.get(0).getSimilarity();  // = combined hybrid score
-        if (chunks.size() < 2) confidence *= PENALTY_FEW_CHUNKS;
-        else if (chunks.size() < 3) confidence *= PENALTY_SOME_CHUNKS;
+
+        // No supporting evidence retrieved at all.
+        if (chunks.isEmpty()) {
+            return 0.05;
+        }
+
+        // --- Base score from top-chunk retrieval ---
+        // combined_score = semantic(0.7) + FTS(0.3), range [0, 1].
+        // FTS-only chunks land around 0.15–0.30 even when they contain the exact answer,
+        // so we use relaxed tiers that treat anything above 0.20 as potentially useful.
+        double topScore = chunks.get(0).getSimilarity();
+
+        double baseConfidence;
+        if (topScore >= 0.70) {
+            baseConfidence = 0.92;
+        } else if (topScore >= 0.55) {
+            baseConfidence = 0.82;
+        } else if (topScore >= 0.38) {
+            baseConfidence = 0.70;
+        } else if (topScore >= 0.22) {
+            baseConfidence = 0.58;
+        } else if (topScore >= 0.10) {
+            baseConfidence = 0.42;
+        } else {
+            baseConfidence = 0.25;
+        }
+
+        // --- Corroboration bonus: multiple chunks agreeing raises confidence ---
+        // Each additional chunk above a minimum threshold adds a small bonus,
+        // capped so that 3+ supporting chunks can lift a borderline score to "high".
+        long corroboratingChunks = chunks.stream()
+                .skip(1) // skip top chunk already accounted for
+                .filter(c -> c.getSimilarity() >= 0.18)
+                .count();
+        double corroborationBonus = Math.min(corroboratingChunks * 0.05, 0.15);
+
+        double confidence = baseConfidence + corroborationBonus;
+
+        // AFTER
+// Only penalise when the LLM's answer is purely negative — i.e. the
+// entire answer signals missing evidence. Partial answers that begin
+// with a hedge but contain substantive content should not be capped.
+// Strategy: check for the exact sentinel the system prompt mandates
+// ("Insufficient evidence in current documentation") and a small set
+// of unambiguous no-evidence phrases.
         if (answer != null) {
-            String lower = answer.toLowerCase();
-            if (lower.contains("insufficient") || lower.contains("not mentioned")
-                    || lower.contains("no evidence") || lower.contains("not found")
-                    || lower.contains("unable to")) {
+            String lower = answer.toLowerCase().trim();
+            boolean purelyNegative =
+                    lower.startsWith("insufficient evidence")
+                            || lower.equals("no evidence found")
+                            || (lower.contains("not documented") && lower.length() < 80)
+                            || (lower.contains("no information") && lower.length() < 80);
+            if (purelyNegative) {
                 confidence = Math.min(confidence, LOW_CONFIDENCE_CEILING);
             }
         }
-        return Math.clamp(confidence, 0.0, 1.0);
+
+        return Math.max(0.0, Math.min(1.0, confidence));
     }
 }

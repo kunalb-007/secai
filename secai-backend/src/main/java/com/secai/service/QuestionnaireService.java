@@ -264,8 +264,8 @@ public class QuestionnaireService {
         questionRepo.deleteByQuestionnaireIdAndOrganizationId(questionnaireId, orgId);
         questionnaireRepo.delete(q);
 
-        log.info("Deleted questionnaire {}",
-                questionnaireId);
+//        log.info("Deleted questionnaire {}",
+//                questionnaireId);
     }
 
     // ── Mapping helpers ───────────────────────────────────────────────────────

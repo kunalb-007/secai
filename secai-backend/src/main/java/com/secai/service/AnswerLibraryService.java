@@ -121,6 +121,8 @@ public class AnswerLibraryService {
                                 .approvedByEmail(approvedByEmail)
                                 .approvedAt(OffsetDateTime.now())
                                 .questionEmbedding(embedding)
+                                .sourceChunkId(q.getSourceChunkId())
+                                .sourceDocumentId(q.getSourceDocumentId())
                                 .build()
                 );
                 log.info("[library] Added new approved answer to library for question {}",

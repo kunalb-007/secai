@@ -49,32 +49,87 @@ app:
     bucket: ${STORAGE_BUCKET:secai-files}
     region: us-east-1
 
+  # ── AI / LLM configuration ─────────────────────────────────────────────────
+  #
+  # Three backends supported — switch by changing the values below or
+  # setting environment variables. No code changes required.
+  #
+  # Backend A — GitHub Models (default, for development):
+  #   api-key:    set GITHUB_TOKEN env var
+  #   base-url:   https://models.inference.ai.azure.com
+  #   chat-model: gpt-4o-mini
+  #   timeout:    30
+  #
+  # Backend B — Ollama local (for local testing, zero API cost):
+  #   api-key:    ollama
+  #   base-url:   http://localhost:11434/v1
+  #   chat-model: qwen2.5:7b
+  #   timeout:    120   ← higher because local GPU is slower + first-call model load
+  #
+  # Backend C — OpenAI (for production):
+  #   api-key:    set OPENAI_API_KEY env var
+  #   base-url:   https://api.openai.com/v1
+  #   chat-model: gpt-4o-mini
+  #   timeout:    30
+  # ───────────────────────────────────────────────────────────────────────────
   openai:
-    # GitHub Models free tier: set GITHUB_TOKEN env var
-    # Switch to OpenAI: change to ${OPENAI_API_KEY} and update base-url
+    # Chat (LLM)
     api-key: ${GITHUB_TOKEN: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}
+    base-url: ${AI_BASE_URL:https://models.inference.ai.azure.com}
+    chat-model: ${AI_CHAT_MODEL:gpt-4o-mini}
+
+    # Embeddings
+    embedding-api-key: ${GITHUB_TOKEN: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}
+    embedding-base-url: https://models.inference.ai.azure.com
     embedding-model: text-embedding-3-small
     embedding-dimensions: 1536
-    base-url: ${AI_BASE_URL:https://models.inference.ai.azure.com}
+
     batch-size: ${AI_BATCH_SIZE:20}
-    chat-model: gpt-4o-mini
+    timeout-seconds: ${AI_TIMEOUT_SECONDS:30}
 
   processing:
     marker-service-url: ${MARKER_SERVICE_URL:http://localhost:8100}
     max-retries: 1
-    chunk-max-tokens: 300
-    chunk-overlap-tokens: 50
+    chunk-max-tokens: 180
+    chunk-overlap-tokens: 30
 
 server:
   port: 8080
 
 logging:
   level:
-    com.secai: DEBUG
-    org.springframework.security: INFO
-#    org:
-#      hibernate:
-#        sql: DEBUG
-#        orm:
-#          jdbc:
-#            bind: TRACE
+    com.secai: INFO
+#    org.springframework.security: INFO
+
+---
+# ── Local testing profile (Ollama + Qwen 2.5 7B) ──────────────────────────
+# Activate with: -Dspring.profiles.active=local
+# OR set environment variable: SPRING_PROFILES_ACTIVE=local
+#
+# What changes vs default:
+#   - LLM uses local Ollama instead of GitHub Models (zero API cost)
+#   - Embeddings still use OpenAI (GITHUB_TOKEN still required for embeddings)
+#   - Timeout raised to 120s for local GPU inference
+#   - SQL logging on to help debug locally
+spring:
+  config:
+    activate:
+      on-profile: local
+#  jpa:
+#    show-sql: true
+
+app:
+  openai:
+    # Ollama accepts any non-empty string as the API key
+    # Chat uses Ollama
+    api-key: ollama
+    base-url: http://localhost:11434/v1
+    chat-model: qwen2.5:7b
+
+    # Embeddings continue using GitHub Models
+    embedding-api-key: ollama
+    embedding-base-url: http://localhost:11434/v1
+    embedding-model: nomic-embed-text:latest
+    embedding-dimensions: 768
+
+    timeout-seconds: 120

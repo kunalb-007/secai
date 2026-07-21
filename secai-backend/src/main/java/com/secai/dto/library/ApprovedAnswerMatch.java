@@ -11,19 +11,20 @@ import java.util.UUID;
  * Carries everything the frontend needs to render the
  * "Found approved answer — Similarity: 96%" card.
  */
+// AFTER
 public record ApprovedAnswerMatch(
         UUID            libraryEntryId,
-        String          sourceQuestionText,   // the original question that was approved
+        String          sourceQuestionText,
         String          answerText,
         String          evidence,
         String          approvedByEmail,
         OffsetDateTime  approvedAt,
-
-        /** 0.0–1.0 cosine similarity, e.g. 0.96 */
         double          similarity,
-
-        /** Similarity as a display percentage, e.g. 96 */
-        int             similarityPercent
+        int             similarityPercent,
+        UUID sourceChunkId,
+        // NEW — the document that originally supplied the evidence,
+        // so the frontend can render a clickable source chip
+        UUID            sourceDocumentId
 ) {
     public static ApprovedAnswerMatch from(ApprovedAnswer entry) {
         double sim = entry.getSimilarity();
@@ -35,7 +36,9 @@ public record ApprovedAnswerMatch(
                 entry.getApprovedByEmail(),
                 entry.getApprovedAt(),
                 sim,
-                (int) Math.round(sim * 100)
+                (int) Math.round(sim * 100),
+                entry.getSourceChunkId(),
+                entry.getSourceDocumentId()  // NEW — must be stored on ApprovedAnswer entity
         );
     }
 }

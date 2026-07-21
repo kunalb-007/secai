@@ -9,34 +9,89 @@ import java.util.regex.Pattern;
 /**
  * Splits cleaned document text into chunks suitable for embedding.
  *
- * Strategy:
- * 1. Split at Markdown heading boundaries (# H1, ## H2, ### H3)
- *    — works for both Marker PDF output and DOCX-converted-to-Markdown
- * 2. If a section exceeds maxTokens, split further at paragraph breaks
- *    with 50-token overlap between chunks
- * 3. Each chunk carries its section_title for citation in AI answers
+ * ROOT CAUSE FIX — "Only 6 chunks from 5,375 chars":
  *
- * Token counting: approximate (1 token ≈ 4 chars for English text).
- * Good enough for chunking; actual token count irrelevant for MVP.
+ * The original chunker split only at Markdown headings (# ## ###).
+ * Plain .txt files and many DOCX files have NO markdown headings,
+ * so the entire document fell into a single "Document" section.
+ * The paragraph splitter then hit the MAX_CONTEXT_CHARS guard and
+ * produced only ~6 large chunks instead of 20–30 granular ones.
+ *
+ * Fix strategy — 3-tier splitting:
+ *   Tier 1: Markdown headings (# H1, ## H2, ### H3) — as before
+ *   Tier 2: ALL-CAPS section labels ("ACCESS CONTROL", "3. ENCRYPTION")
+ *            common in plain-text security docs and older DOCX exports
+ *   Tier 3: Numbered list entries ("1.", "1.1", "A.") at line start
+ *            common in SOC2 evidence packages and security policies
+ *
+ * After section splitting, each section body is further chunked at
+ * paragraph boundaries with 50-token overlap, same as before.
+ *
+ * For completely flat text (no structure at all), a sliding-window
+ * sentence-aware chunker is used as final fallback.
  */
 @Component
 public class TextChunker {
 
-    // Matches Markdown headings: "# Title", "## Section", "### Sub"
-    private static final Pattern HEADING = Pattern.compile(
+    // ── Heading patterns ──────────────────────────────────────────────────────
+
+    /** Markdown heading: "# Title", "## Section", "### Sub" */
+    private static final Pattern MARKDOWN_HEADING = Pattern.compile(
             "^(#{1,3})\\s+(.+)$"
     );
 
+    /**
+     * ALL-CAPS section label: at least 3 words or 8 chars, no leading digits.
+     * Matches: "ACCESS CONTROL", "ENCRYPTION AND KEY MANAGEMENT"
+     * Rejects:  "YES", "NO", "N/A", "TLS 1.3" (short / has digits)
+     */
+    private static final Pattern ALLCAPS_SECTION = Pattern.compile(
+            "^([A-Z][A-Z\\s/&\\-]{6,})$"
+    );
+
+    /**
+     * Numbered section label: "1.", "1.1", "1.1.2", "A.", "CC6.1"
+     * Must be at line start, followed by a space and a title word.
+     * Min title length 4 chars to avoid matching list items like "1. Yes".
+     */
+//    private static final Pattern NUMBERED_SECTION = Pattern.compile(
+//            "^(\\d+\\.(?:\\d+\\.?)*|[A-Z]\\.)\\s+([A-Z].{3,})$"
+//    );
+
+    private static final Pattern NUMBERED_SECTION = Pattern.compile(
+            "^((?:CC\\d+(?:\\.\\d+)*)|(?:\\d+(?:\\.\\d+)*)|(?:[A-Z]\\.?))\\s+(.{3,})$"
+    );
+
+    /**
+     * Completely flat fallback: treat a blank line between two non-empty
+     * paragraphs as a soft split point.
+     */
+    private static final Pattern PARAGRAPH_BREAK = Pattern.compile(
+            "\\n{2,}"
+    );
+
+
+    // ── Config ────────────────────────────────────────────────────────────────
+
     private final int maxTokens;
     private final int overlapTokens;
+
+    /**
+     * Minimum tokens a section body must have to be emitted as its own chunk.
+     * Sections shorter than this are merged with the previous chunk to avoid
+     * emitting tiny fragments that contain no answerable content.
+     */
+    private static final int MIN_SECTION_TOKENS = 20;
 
     public TextChunker(
             @Value("${app.processing.chunk-max-tokens:300}") int maxTokens,
             @Value("${app.processing.chunk-overlap-tokens:50}") int overlapTokens
     ) {
-        this.maxTokens    = maxTokens;
+        this.maxTokens     = maxTokens;
         this.overlapTokens = overlapTokens;
     }
+
+    // ── Public record ─────────────────────────────────────────────────────────
 
     public record Chunk(
             String sectionTitle,
@@ -45,15 +100,20 @@ public class TextChunker {
             int    tokenCount
     ) {}
 
-    /**
-     * Main entry point. Takes cleaned text, returns ordered list of chunks.
-     */
+    // ── Main entry point ──────────────────────────────────────────────────────
+
     public List<Chunk> chunk(String cleanedText) {
         if (cleanedText == null || cleanedText.isBlank()) return List.of();
 
         List<Section> sections = splitIntoSections(cleanedText);
-        List<Chunk>   chunks   = new ArrayList<>();
-        int chunkIndex = 0;
+
+        // If splitting produced only 1 section AND it's large, try paragraph fallback
+        if (sections.size() == 1 && estimateTokens(sections.get(0).body()) > maxTokens * 2) {
+            sections = splitByParagraphs(cleanedText);
+        }
+
+        List<Chunk>   chunks     = new ArrayList<>();
+        int           chunkIndex = 0;
 
         for (Section section : sections) {
             List<Chunk> sectionChunks = chunkSection(section, chunkIndex);
@@ -64,138 +124,177 @@ public class TextChunker {
         return chunks;
     }
 
-    // ---- Internal types ----
+    // ── Section detection ─────────────────────────────────────────────────────
 
     private record Section(String title, String body) {}
 
     /**
-     * Step 1: Split the full document into sections at heading boundaries.
-     * Each section has a title (from the heading) and a body (the text below it).
+     * 3-tier heading detection — tries each pattern in priority order,
+     * falls back to the next tier if no headings are found.
      */
     private List<Section> splitIntoSections(String text) {
-        List<Section>  sections       = new ArrayList<>();
-        String[]       lines          = text.split("\n");
-        String currentTitle = null;
-        StringBuilder currentBody = new StringBuilder();
-        boolean headingFound = false;
+        // Tier 1: Markdown headings
+        List<Section> sections = splitByPattern(text, HeadingType.MARKDOWN);
+        if (sections.size() > 1) return sections;
+
+        // Tier 2: ALL-CAPS section labels
+        sections = splitByPattern(text, HeadingType.ALLCAPS);
+        if (sections.size() > 1) return sections;
+
+        // Tier 3: Numbered section labels
+        sections = splitByPattern(text, HeadingType.NUMBERED);
+        if (sections.size() > 1) return sections;
+
+        // No structure found — return as one section for paragraph fallback
+        return List.of(new Section("Document", text.strip()));
+    }
+
+    private enum HeadingType { MARKDOWN, ALLCAPS, NUMBERED }
+
+    private List<Section> splitByPattern(String text, HeadingType type) {
+        List<Section>  sections     = new ArrayList<>();
+        String[]       lines        = text.split("\n");
+        String         currentTitle = "Document";
+        StringBuilder  currentBody  = new StringBuilder();
+        boolean        foundHeading = false;
 
         for (String line : lines) {
-            var matcher = HEADING.matcher(line.trim());
-            if (matcher.matches()) {
+            String trimmed = line.trim();
+            String headingTitle = detectHeading(trimmed, type);
 
-                headingFound = true;
-
-                if (!currentBody.toString().isBlank()) {
-
-                    sections.add(new Section(
-                            currentTitle == null ? "Document" : currentTitle,
-                            currentBody.toString().strip()
-                    ));
+            if (headingTitle != null) {
+                foundHeading = true;
+                String bodyText = currentBody.toString().strip();
+                if (estimateTokens(bodyText) >= MIN_SECTION_TOKENS) {
+                    sections.add(new Section(currentTitle, bodyText));
+                } else if (!sections.isEmpty() && !bodyText.isEmpty()) {
+                    // Merge short orphan body into previous section
+                    Section prev = sections.remove(sections.size() - 1);
+                    sections.add(new Section(prev.title(), prev.body() + "\n\n" + bodyText));
                 }
-
-                currentTitle = matcher.group(2).trim();
-                currentBody = new StringBuilder();
+                currentTitle = headingTitle;
+                currentBody  = new StringBuilder();
             } else {
                 currentBody.append(line).append("\n");
             }
         }
 
         // Flush last section
-        if (!currentBody.toString().isBlank()) {
-
-            sections.add(new Section(
-                    headingFound
-                            ? (currentTitle != null ? currentTitle : "Document")
-                            : "Document",
-                    currentBody.toString().strip()
-            ));
+        String lastBody = currentBody.toString().strip();
+        if (!lastBody.isBlank()) {
+            sections.add(new Section(currentTitle, lastBody));
         }
 
-        // CRITICAL FIX: if no headings found, treat whole document as one section.
-        // Without this, plain TXT files and DOCX without heading styles produce
-        // zero chunks, causing DocumentProcessingService to throw.
-        if (sections.isEmpty() && !text.isBlank()) {
-            sections.add(new Section("Document", text.strip()));
-        }
-
+        if (!foundHeading) return List.of(new Section("Document", text.strip()));
         return sections;
     }
 
+    /** Returns the heading label if the line matches the given type, else null. */
+    private String detectHeading(String line, HeadingType type) {
+        return switch (type) {
+            case MARKDOWN -> {
+                var m = MARKDOWN_HEADING.matcher(line);
+                yield m.matches() ? m.group(2).trim() : null;
+            }
+            case ALLCAPS -> {
+                // Must be ALL_CAPS, at least 8 chars, no digits (avoids matching "AES-256 GCM")
+                var m = ALLCAPS_SECTION.matcher(line);
+                if (!m.matches()) yield null;
+                // Reject if it contains 2+ consecutive digits (data value, not a title)
+                if (line.matches(".*\\d{2,}.*")) yield null;
+                yield line.trim();
+            }
+            case NUMBERED -> {
+                var m = NUMBERED_SECTION.matcher(line);
+                yield m.matches() ? m.group(1) + " " + m.group(2) : null;
+            }
+        };
+    }
+
     /**
-     * Step 2: For each section, split body into token-sized chunks with overlap.
-     * Splits at paragraph boundaries where possible to avoid mid-sentence cuts.
+     * Paragraph-based fallback when no structural headings are found.
+     * Groups consecutive paragraphs until maxTokens is reached, then flushes.
+     * Each flush carries an auto-generated title from the first sentence.
      */
+    private List<Section> splitByParagraphs(String text) {
+        String[]      paragraphs = PARAGRAPH_BREAK.split(text);
+        List<Section> sections   = new ArrayList<>();
+        StringBuilder current    = new StringBuilder();
+        String        title      = "Document";
+
+        for (String para : paragraphs) {
+            String trimmed = para.trim();
+            if (trimmed.isBlank()) continue;
+
+            if (current.length() == 0) {
+                // First paragraph in this section becomes the title (first 60 chars)
+                title = trimmed.length() > 60 ? trimmed.substring(0, 60) + "…" : trimmed;
+            }
+
+            if (estimateTokens(current.toString()) + estimateTokens(trimmed) > maxTokens
+                    && current.length() > 0) {
+                sections.add(new Section(title, current.toString().strip()));
+                title   = trimmed.length() > 60 ? trimmed.substring(0, 60) + "…" : trimmed;
+                current = new StringBuilder();
+            }
+
+            current.append(trimmed).append("\n\n");
+        }
+
+        if (current.length() > 0) {
+            sections.add(new Section(title, current.toString().strip()));
+        }
+
+        return sections.isEmpty()
+                ? List.of(new Section("Document", text.strip()))
+                : sections;
+    }
+
+    // ── Section → chunks ──────────────────────────────────────────────────────
+
     private List<Chunk> chunkSection(Section section, int startIndex) {
         List<Chunk> chunks = new ArrayList<>();
         String body = section.body();
 
         if (estimateTokens(body) <= maxTokens) {
-            // Section fits in one chunk — no splitting needed
-            chunks.add(new Chunk(
-                    section.title(), body, startIndex, estimateTokens(body)
-            ));
+            chunks.add(new Chunk(section.title(), body, startIndex, estimateTokens(body)));
             return chunks;
         }
 
-        // Split into paragraphs
         String[] paragraphs = body.split("\n\n+");
         StringBuilder current = new StringBuilder();
         int idx = startIndex;
 
         for (String paragraph : paragraphs) {
-            int currentTokens    = estimateTokens(current.toString());
-            int paragraphTokens  = estimateTokens(paragraph);
+            int currentTokens   = estimateTokens(current.toString());
+            int paragraphTokens = estimateTokens(paragraph);
 
+            // Paragraph alone exceeds limit — split it at word boundaries
             if (paragraphTokens > maxTokens) {
-
                 if (!current.toString().isBlank()) {
-
-                    String chunkText = current.toString().strip();
-
-                    chunks.add(new Chunk(
-                            section.title(),
-                            chunkText,
-                            idx++,
-                            estimateTokens(chunkText)
-                    ));
-
+                    String ct = current.toString().strip();
+                    chunks.add(new Chunk(section.title(), ct, idx++, estimateTokens(ct)));
                     current = new StringBuilder();
                 }
-
-                idx = splitLargeParagraph(
-                        section.title(),
-                        paragraph,
-                        idx,
-                        chunks
-                );
-
+                idx = splitLargeParagraph(section.title(), paragraph, idx, chunks);
                 continue;
             }
 
             if (currentTokens + paragraphTokens > maxTokens && currentTokens > 0) {
-                // Flush current chunk
-                String chunkText = current.toString().strip();
-                chunks.add(new Chunk(section.title(), chunkText, idx++, estimateTokens(chunkText)));
+                String ct = current.toString().strip();
+                chunks.add(new Chunk(section.title(), ct, idx++, estimateTokens(ct)));
 
-                // Build overlap for next chunk from tail of current chunk
-                String overlapText = buildOverlap(chunkText, overlapTokens);
+                String overlap = buildOverlap(ct, overlapTokens);
                 current = new StringBuilder();
-
-                if (!overlapText.isBlank()) {
-                    current.append(overlapText).append("\n\n");
-                }
-
-// If overlap + current paragraph would exceed maxTokens,
-// don't carry overlap into the next chunk.
-                if (estimateTokens(current.toString()) + paragraphTokens > maxTokens) {
-                    current = new StringBuilder();
+                if (!overlap.isBlank() &&
+                        estimateTokens(overlap) + paragraphTokens <= maxTokens) {
+                    current.append(overlap).append("\n\n");
                 }
             }
 
             current.append(paragraph).append("\n\n");
         }
 
-        // Flush remaining text
         String remaining = current.toString().strip();
         if (!remaining.isBlank()) {
             chunks.add(new Chunk(section.title(), remaining, idx, estimateTokens(remaining)));
@@ -204,23 +303,44 @@ public class TextChunker {
         return chunks;
     }
 
-    /**
-     * Extract the last N tokens worth of text for overlap.
-     * Takes the last overlapTokens * 4 characters (approximate).
-     */
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private int splitLargeParagraph(String title, String paragraph, int startIdx,
+                                    List<Chunk> chunks) {
+        int maxChars     = maxTokens * 4;
+        int overlapChars = overlapTokens * 4;
+        int start        = 0;
+        int idx          = startIdx;
+
+        while (start < paragraph.length()) {
+            int end = Math.min(start + maxChars, paragraph.length());
+
+            // Retreat to a word boundary
+            int adjusted = end;
+            while (adjusted > start && adjusted < paragraph.length()
+                    && !Character.isWhitespace(paragraph.charAt(adjusted - 1))) {
+                adjusted--;
+            }
+            if (adjusted <= start) adjusted = end;
+
+            String t = paragraph.substring(start, adjusted);
+            chunks.add(new Chunk(title, t, idx++, estimateTokens(t)));
+
+            if (adjusted >= paragraph.length()) break;
+            start = Math.max(0, adjusted - overlapChars);
+        }
+
+        return idx;
+    }
+
     private String buildOverlap(String text, int overlapTokens) {
         int targetChars = overlapTokens * 4;
         if (text.length() <= targetChars) return text;
-
-        // Try to find a sentence or paragraph boundary near the overlap point
         String tail = text.substring(text.length() - targetChars);
-        int sentenceBreak = findSentenceBreak(tail);
-        return sentenceBreak > 0 ? tail.substring(sentenceBreak).trim() : tail.trim();
+        int sb = findSentenceBreak(tail);
+        return sb > 0 ? tail.substring(sb).trim() : tail.trim();
     }
 
-    /**
-     * Find a good sentence boundary (". " or "\n") to start overlap at.
-     */
     private int findSentenceBreak(String text) {
         for (int i = 0; i < Math.min(text.length(), 100); i++) {
             char c = text.charAt(i);
@@ -229,65 +349,8 @@ public class TextChunker {
         return -1;
     }
 
-    /**
-     * Approximate token count: 1 token ≈ 4 characters for English.
-     * Accurate enough for chunking decisions — actual OpenAI token count
-     * is not needed here.
-     */
     public int estimateTokens(String text) {
         if (text == null || text.isBlank()) return 0;
         return (int) Math.ceil(text.length() / 4.0);
-    }
-
-    private int splitLargeParagraph(
-            String sectionTitle,
-            String paragraph,
-            int startIndex,
-            List<Chunk> chunks
-    ) {
-
-        int maxChars = maxTokens * 4;
-        int overlapChars = overlapTokens * 4;
-
-        int start = 0;
-        int index = startIndex;
-
-        while (start < paragraph.length()) {
-
-            int end = Math.min(start + maxChars, paragraph.length());
-
-// Prefer ending at a word boundary instead of splitting a word
-            int adjustedEnd = end;
-
-            while (adjustedEnd > start
-                    && adjustedEnd < paragraph.length()
-                    && !Character.isWhitespace(paragraph.charAt(adjustedEnd - 1))) {
-
-                adjustedEnd--;
-            }
-
-// Fallback if no whitespace was found
-            if (adjustedEnd <= start) {
-                adjustedEnd = end;
-            }
-
-            String text = paragraph.substring(start, adjustedEnd);
-
-            chunks.add(new Chunk(
-                    sectionTitle,
-                    text,
-                    index++,
-                    estimateTokens(text)
-            ));
-
-            if (adjustedEnd >= paragraph.length()) {
-                break;
-            }
-
-// Start next chunk with overlap
-            start = Math.max(0, adjustedEnd - overlapChars);
-        }
-
-        return index;
     }
 }

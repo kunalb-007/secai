@@ -11,6 +11,7 @@ import com.secai.dto.coverage.CoverageReportResponse;
 import com.secai.exception.NotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -108,7 +109,7 @@ public class CoverageAnalysisService {
             QuestionRepository       questionRepo,
             DocumentChunkRepository  chunkRepo,
             EmbeddingService         embeddingService,
-            CoverageAnalysisAsyncRunner asyncRunner
+            @Lazy CoverageAnalysisAsyncRunner asyncRunner
     ) {
         this.coverageRepo      = coverageRepo;
         this.questionnaireRepo = questionnaireRepo;
@@ -127,7 +128,7 @@ public class CoverageAnalysisService {
      */
     @Transactional
     public void triggerAnalysis(UUID questionnaireId, UUID orgId) {
-        log.info("[coverage] Triggering analysis for questionnaire {}", questionnaireId);
+//        log.info("[coverage] Triggering analysis for questionnaire {}", questionnaireId);
 
         coverageRepo.findByQuestionnaireId(questionnaireId)
                 .ifPresent(coverageRepo::delete);
@@ -201,7 +202,7 @@ public class CoverageAnalysisService {
     // Rename runAnalysisAsync → runAnalysis, remove @Async annotation
 // (async dispatch is now handled by CoverageAnalysisAsyncRunner)
     public void runAnalysis(UUID reportId, UUID questionnaireId, UUID orgId) {
-        log.info("[coverage:{}] Starting analysis for questionnaire {}", reportId, questionnaireId);
+//        log.info("[coverage:{}] Starting analysis for questionnaire {}", reportId, questionnaireId);
 
         CoverageReport report = coverageRepo.findById(reportId).orElse(null);
         if (report == null) return;
@@ -286,22 +287,35 @@ public class CoverageAnalysisService {
 
     // ── Category analysis ─────────────────────────────────────────────────────
 
+    // AFTER
     private CategoryCoverage analyseCategory(
             String category, List<Question> questions, UUID orgId
     ) {
         int total = questions.size();
 
-        // Sample up to MAX_SAMPLE_PER_CATEGORY questions
         List<Question> sample = questions.size() <= MAX_SAMPLE_PER_CATEGORY
                 ? questions
                 : sampleQuestions(questions, MAX_SAMPLE_PER_CATEGORY);
 
         int answerableInSample = 0;
 
+        // Track unanswered questions by text so the UI can show them individually.
+        // Capped at 5 per category to avoid overwhelming the response payload.
+        List<String> unansweredTexts = new ArrayList<>();
+
         for (Question q : sample) {
             try {
                 boolean answerable = isAnswerable(q.getQuestionText(), q.getQuestionText(), orgId);
-                if (answerable) answerableInSample++;
+                if (answerable) {
+                    answerableInSample++;
+                } else if (unansweredTexts.size() < 5) {
+                    // Truncate very long question text to 120 chars for display
+                    String display = q.getQuestionText() == null ? "(unknown)"
+                            : q.getQuestionText().length() > 120
+                              ? q.getQuestionText().substring(0, 120) + "…"
+                              : q.getQuestionText();
+                    unansweredTexts.add(display);
+                }
             } catch (Exception e) {
                 log.warn(
                         "[coverage] Failed analysing category='{}' question='{}'",
@@ -312,13 +326,12 @@ public class CoverageAnalysisService {
             }
         }
 
-        // Extrapolate from sample to full category
         double sampleCoverage = sample.isEmpty()
                 ? 0.0
                 : (double) answerableInSample / sample.size();
 
         int estimatedAnswerable = (int) Math.round(sampleCoverage * total);
-        String tier = coverageTier(sampleCoverage);
+        String tier       = coverageTier(sampleCoverage);
         String suggestion = sampleCoverage < LOW_COVERAGE_THRESHOLD
                 ? suggestDocument(category)
                 : null;
@@ -330,6 +343,7 @@ public class CoverageAnalysisService {
                 .answerableQuestions(estimatedAnswerable)
                 .coverageTier(tier)
                 .missingDocSuggestion(suggestion)
+                .unansweredQuestions(unansweredTexts)
                 .build();
     }
 

@@ -3,6 +3,7 @@ package com.secai.service;
 import com.secai.domain.questionnaire.*;
 import com.secai.domain.questionnaire.AiGenerationJob.AiJobStatus;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 
@@ -36,7 +37,7 @@ public class AnswerGenerationAsyncRunner {
             QuestionRepository        questionRepo,
             AiGenerationJobRepository jobRepo,
             QuestionnaireRepository   questionnaireRepo,
-            AnswerGenerationService   generationService
+            @Lazy AnswerGenerationService   generationService
     ) {
         this.questionRepo       = questionRepo;
         this.jobRepo            = jobRepo;

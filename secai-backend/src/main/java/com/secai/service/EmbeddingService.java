@@ -28,17 +28,31 @@ public class EmbeddingService {
     private final String  model;
     private final int     batchSize;
     private final String  baseUrl;
+    private final int dimensions;
+
     private final HttpClient httpClient;
     private final ObjectMapper mapper;
 
     public EmbeddingService(
-            @Value("${app.openai.api-key}")          String apiKey,
-            @Value("${app.openai.embedding-model}")  String model,
-            @Value("${app.openai.batch-size:100}")   int batchSize,
-            @Value("${app.openai.base-url}")         String baseUrl
+
+            @Value("${app.openai.embedding-api-key}")
+            String apiKey,
+
+            @Value("${app.openai.embedding-model}")
+            String model,
+
+            @Value("${app.openai.embedding-dimensions}")
+            int dimensions,
+
+            @Value("${app.openai.batch-size:100}")
+            int batchSize,
+
+            @Value("${app.openai.embedding-base-url}")
+            String baseUrl
     ) {
         this.apiKey    = apiKey;
         this.model     = model;
+        this.dimensions = dimensions;
         this.batchSize = batchSize;
         this.baseUrl   = baseUrl;
         this.httpClient = HttpClient.newBuilder()
@@ -119,10 +133,15 @@ public class EmbeddingService {
         // Build request JSON — GitHub Models OpenAI-compatible endpoint
         ObjectNode requestBody = mapper.createObjectNode();
         requestBody.put("model", model);
-        requestBody.put("dimensions", 1536);    // explicit for GitHub Models
-        requestBody.put("encoding_format", "float");
+
         ArrayNode inputArray = requestBody.putArray("input");
         texts.forEach(inputArray::add);
+
+// Only for OpenAI / GitHub Models
+        if (!baseUrl.contains("localhost:11434")) {
+            requestBody.put("dimensions", dimensions);
+            requestBody.put("encoding_format", "float");
+        }
 
         String requestJson = mapper.writeValueAsString(requestBody);
 

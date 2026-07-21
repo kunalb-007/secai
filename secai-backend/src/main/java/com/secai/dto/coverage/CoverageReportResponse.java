@@ -42,13 +42,15 @@ public record CoverageReportResponse(
 
 ) {
     public record CategoryRow(
-            String  category,
-            double  coverage,
-            int     coveragePercent,
-            int     totalQuestions,
-            int     answerableQuestions,
-            String  tier,               // HIGH | MEDIUM | LOW | CRITICAL
-            String  missingDocSuggestion
+            String       category,
+            double       coverage,
+            int          coveragePercent,
+            int          totalQuestions,
+            int          answerableQuestions,
+            String       tier,
+            String       missingDocSuggestion,
+            // NEW — up to 5 unanswered question texts for per-question gap display
+            List<String> unansweredQuestions
     ) {}
 
     /** Build from the domain entity */
@@ -73,7 +75,10 @@ public record CoverageReportResponse(
                         c.getTotalQuestions(),
                         c.getAnswerableQuestions(),
                         c.getCoverageTier(),
-                        c.getMissingDocSuggestion()
+                        c.getMissingDocSuggestion(),
+                        c.getUnansweredQuestions() != null
+                        ? c.getUnansweredQuestions()
+                        : List.of()
                 ))
                 .toList();
 

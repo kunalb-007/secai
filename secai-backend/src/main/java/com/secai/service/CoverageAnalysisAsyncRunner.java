@@ -4,6 +4,7 @@ import com.secai.domain.coverage.CoverageReportRepository;
 import com.secai.domain.questionnaire.QuestionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 
@@ -25,7 +26,7 @@ public class CoverageAnalysisAsyncRunner {
     public CoverageAnalysisAsyncRunner(
             CoverageReportRepository coverageRepo,
             QuestionRepository       questionRepo,
-            CoverageAnalysisService  coverageService
+            @Lazy CoverageAnalysisService  coverageService
     ) {
         this.coverageRepo   = coverageRepo;
         this.questionRepo   = questionRepo;

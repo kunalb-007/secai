@@ -357,6 +357,10 @@ export default function QuestionnaireReviewPage() {
     const [editOpen, setEditOpen]           = useState(false);
     const [savingEdit, setSavingEdit]       = useState(false);
 
+    // ── Question detail modal ─────────────────────────────────────────────
+    const [detailTarget, setDetailTarget] = useState(null);
+    const [detailOpen, setDetailOpen] = useState(false);
+
     // ── Per-row loading ───────────────────────────────────────────────────────
     const [rowLoading, setRowLoading]       = useState({});
 
@@ -626,14 +630,28 @@ export default function QuestionnaireReviewPage() {
     // Table columns
     // ─────────────────────────────────────────────────────────────────────────
 
+    // ─── helper: sequential fallback numbering ────────────────────────────────
+    const getDisplayNumber = (record, idx) => {
+        if (record.questionNumber && String(record.questionNumber).trim()) {
+            return String(record.questionNumber).trim();
+        }
+        return String(currentPage * PAGE_SIZE + idx + 1);
+    };
+
+    const openQuestionDetail = (question) => {
+        setDetailTarget(question);
+        setDetailOpen(true);
+    };
+
     const columns = [
         {
             title:     '#',
             dataIndex: 'questionNumber',
             width:     58,
-            render: (v) => v
-                ? <Text code style={{ fontSize: 11 }}>{v}</Text>
-                : <Text type="secondary" style={{ fontSize: 12 }}>—</Text>,
+            render: (v, record, idx) => {
+                const num = getDisplayNumber(record, idx);
+                return <Text code style={{ fontSize: 11 }}>{num}</Text>;
+            },
         },
         {
             title:     'Category',
@@ -653,7 +671,6 @@ export default function QuestionnaireReviewPage() {
             ),
         },
         {
-            // Rich evidence + answer + library match
             title:     'AI Answer & Evidence',
             dataIndex: 'aiAnswer',
             render: (answer, record, idx) => {
@@ -669,7 +686,6 @@ export default function QuestionnaireReviewPage() {
 
                 return (
                     <div>
-                        {/* Library match card — shown above the answer */}
                         {showMatch && (
                             <LibraryMatchCard
                                 match={libMatch}
@@ -684,14 +700,14 @@ export default function QuestionnaireReviewPage() {
                                 }
                             />
                         )}
-
-                        {/* Rich evidence panel */}
                         <EvidencePanel
                             answer={displayAnswer}
                             evidence={record.evidence}
                             retrievalScore={record.retrievalScore}
                             status={record.status}
                             fromLibrary={showMatch === false && !!libMatch}
+                            sourceChunkId={record.sourceChunkId}
+                            sourceDocumentId={record.sourceDocumentId}
                         />
                     </div>
                 );
@@ -713,23 +729,58 @@ export default function QuestionnaireReviewPage() {
         {
             title: (
                 <Tooltip title="A=Approve  E=Edit  R=Reject">
-          <span>Actions <kbd style={{
-              background: '#f5f5f5', border: '1px solid #d9d9d9',
-              borderRadius: 3, padding: '0 4px', fontSize: 9,
-          }}>⌨</kbd></span>
+                <span>Actions <kbd style={{
+                    background: '#f5f5f5', border: '1px solid #d9d9d9',
+                    borderRadius: 3, padding: '0 4px', fontSize: 9,
+                }}>⌨</kbd></span>
                 </Tooltip>
             ),
-            width:  118,
+            width:  130,
             render: (_, record, idx) => {
                 if (!record.aiAnswer) return null;
                 const busy = rowLoading[record.id];
+
+                // ── APPROVED: show read-only badge + optional View button ──────────
+                if (record.status === 'APPROVED') {
+                    return (
+                        <Space size={4}>
+                            <Tag
+                                color="success"
+                                icon={<CheckCircleOutlined />}
+                                style={{ fontSize: 11, margin: 0 }}
+                            >
+                                Approved
+                            </Tag>
+                            <Tooltip title="View details">
+                                <Button
+                                    type="text"
+                                    size="small"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        setFocusedRowIdx(idx);
+                                        setDetailTarget(record);
+                                        setDetailOpen(true);
+                                    }}
+                                >
+                                    View
+                                </Button>
+                            </Tooltip>
+                        </Space>
+                    );
+                }
+
+                // ── DEFAULT: edit / approve / reject ─────────────────────────────
                 return (
                     <Space size={2}>
                         <Tooltip title="Edit (E)">
                             <Button
                                 type="text" size="small"
                                 icon={<EditOutlined />}
-                                onClick={() => { setFocusedRowIdx(idx); openEdit(record); }}
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    setFocusedRowIdx(idx);
+                                    openEdit(record);
+                                }}
                                 disabled={busy}
                             />
                         </Tooltip>
@@ -737,16 +788,23 @@ export default function QuestionnaireReviewPage() {
                             <Button
                                 type="text" size="small"
                                 icon={<CheckOutlined style={{ color: '#52c41a' }} />}
-                                onClick={() => { setFocusedRowIdx(idx); handleApprove(record); }}
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    setFocusedRowIdx(idx);
+                                    handleApprove(record);
+                                }}
                                 loading={busy}
-                                disabled={record.status === 'APPROVED'}
                             />
                         </Tooltip>
                         <Tooltip title="Reject (R)">
                             <Button
                                 type="text" size="small" danger
                                 icon={<CloseOutlined />}
-                                onClick={() => { setFocusedRowIdx(idx); handleReject(record); }}
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    setFocusedRowIdx(idx);
+                                    handleReject(record);
+                                }}
                                 loading={busy}
                                 disabled={record.status === 'REJECTED'}
                             />
@@ -782,6 +840,112 @@ export default function QuestionnaireReviewPage() {
                     </Button>
                 </div>
             </AppLayout>
+        );
+    }
+
+    function QuestionDetailModal({ question, open, onClose, onEdit, onApprove, onReject, rowLoading }) {
+        if (!question) return null;
+        const busy = rowLoading?.[question.id];
+        const displayAnswer =
+            (question.status === 'EDITED' || question.status === 'REJECTED') && question.manualAnswer
+                ? question.manualAnswer
+                : question.aiAnswer;
+
+        const statusCfg = STATUS_CFG[question.status] || { color: 'default', label: question.status };
+
+        return (
+            <Modal
+                open={open}
+                onCancel={onClose}
+                footer={null}
+                width={720}
+                title={
+                    <Space>
+                        <Text code style={{ fontSize: 12 }}>
+                            {question.questionNumber || '—'}
+                        </Text>
+                        <Tag color={statusCfg.color} style={{ fontSize: 11 }}>{statusCfg.label}</Tag>
+                        {question.category && <Tag style={{ fontSize: 11 }}>{question.category}</Tag>}
+                    </Space>
+                }
+                destroyOnClose
+            >
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+                    {/* Question text */}
+                    <div style={{
+                        background: '#f5f5f5', borderRadius: 6,
+                        padding: '12px 16px', borderLeft: '3px solid #1890ff',
+                    }}>
+                        <Text type="secondary" style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', display: 'block', marginBottom: 6 }}>
+                            Question
+                        </Text>
+                        <Text style={{ fontSize: 14, fontWeight: 500, lineHeight: 1.6 }}>
+                            {question.questionText}
+                        </Text>
+                    </div>
+
+                    {/* Answer */}
+                    <div>
+                        <Text type="secondary" style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', display: 'block', marginBottom: 6 }}>
+                            Answer
+                        </Text>
+                        <EvidencePanel
+                            answer={displayAnswer}
+                            evidence={question.evidence}
+                            retrievalScore={question.retrievalScore}
+                            status={question.status}
+                            sourceChunkId={question.sourceChunkId}
+                            sourceDocumentId={question.sourceDocumentId}
+                        />
+                    </div>
+
+                    {/* Manual answer if edited */}
+                    {question.status === 'EDITED' && question.manualAnswer && (
+                        <div style={{
+                            background: '#e6fffb', borderRadius: 6,
+                            padding: '10px 14px', borderLeft: '3px solid #13c2c2',
+                        }}>
+                            <Text type="secondary" style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', display: 'block', marginBottom: 4 }}>
+                                Reviewer's edited answer
+                            </Text>
+                            <Text style={{ fontSize: 13, lineHeight: 1.6 }}>{question.manualAnswer}</Text>
+                        </div>
+                    )}
+
+                    {/* Actions */}
+                    {question.status !== 'APPROVED' && question.aiAnswer && (
+                        <div style={{ display: 'flex', gap: 8, paddingTop: 4, borderTop: '1px solid #f0f0f0' }}>
+                            <Button
+                                icon={<EditOutlined />}
+                                onClick={() => { onClose(); onEdit(question); }}
+                                disabled={busy}
+                            >
+                                Edit
+                            </Button>
+                            {question.status !== 'REJECTED' && (
+                                <Button
+                                    type="primary"
+                                    icon={<CheckOutlined />}
+                                    loading={busy}
+                                    onClick={() => { onApprove(question); onClose(); }}
+                                >
+                                    Approve
+                                </Button>
+                            )}
+                            <Button
+                                danger
+                                icon={<CloseOutlined />}
+                                loading={busy}
+                                disabled={question.status === 'REJECTED'}
+                                onClick={() => { onReject(question); onClose(); }}
+                            >
+                                Reject
+                            </Button>
+                        </div>
+                    )}
+                </div>
+            </Modal>
         );
     }
 
@@ -1046,8 +1210,11 @@ export default function QuestionnaireReviewPage() {
                     }}
                     rowClassName={rowClassName}
                     onRow={(record, idx) => ({
-                        onClick:    () => setFocusedRowIdx(idx),
-                        style:      { cursor: 'default' },
+                        onClick: () => {
+                            setFocusedRowIdx(idx);
+                            openQuestionDetail(record);
+                        },
+                        style: { cursor: 'pointer' },
                     })}
                     pagination={{
                         current:         currentPage + 1,
@@ -1134,6 +1301,17 @@ export default function QuestionnaireReviewPage() {
                         </Text>
                     </div>
                 )}
+
+                {/* ── Question Detail Modal ────────────────────────────────────────── */}
+                <QuestionDetailModal
+                    question={detailTarget}
+                    open={detailOpen}
+                    onClose={() => { setDetailOpen(false); setDetailTarget(null); }}
+                    onEdit={openEdit}
+                    onApprove={handleApprove}
+                    onReject={handleReject}
+                    rowLoading={rowLoading}
+                />
 
                 {/* ── Edit Modal ───────────────────────────────────────────────── */}
                 <EditModal
