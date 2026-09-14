@@ -6,18 +6,15 @@ import com.secai.domain.document.DocumentChunk;
 import com.secai.domain.document.DocumentChunkRepository;
 import com.secai.domain.document.DocumentRepository;
 import com.secai.dto.document.ChunkSourceResponse;
-import com.secai.exception.ForbiddenException;
 import com.secai.exception.NotFoundException;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
 
 import java.util.UUID;
 
-/**
- * GET /api/chunks/{id}
- * Returns the full text of a document chunk for the "View Source" feature.
- * Always org-scoped — a user cannot read chunks from another tenant.
- */
 @RestController
 @RequestMapping("/api/chunks")
 public class ChunkController {

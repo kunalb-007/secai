@@ -7,11 +7,6 @@ import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-/**
- * Enables @Async and @Retryable annotations.
- * Also declares TransactionTemplate for programmatic short-lived transactions
- * in AnswerGenerationService (avoids holding DB connections during LLM calls).
- */
 @Configuration
 @EnableAsync
 @EnableRetry

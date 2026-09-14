@@ -5,13 +5,6 @@ import com.secai.domain.library.ApprovedAnswer;
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
-/**
- * Returned by GET /api/library/match?questionId={id}
- *
- * Carries everything the frontend needs to render the
- * "Found approved answer — Similarity: 96%" card.
- */
-// AFTER
 public record ApprovedAnswerMatch(
         UUID            libraryEntryId,
         String          sourceQuestionText,
@@ -22,8 +15,6 @@ public record ApprovedAnswerMatch(
         double          similarity,
         int             similarityPercent,
         UUID sourceChunkId,
-        // NEW — the document that originally supplied the evidence,
-        // so the frontend can render a clickable source chip
         UUID            sourceDocumentId
 ) {
     public static ApprovedAnswerMatch from(ApprovedAnswer entry) {

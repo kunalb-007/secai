@@ -5,16 +5,6 @@ import lombok.*;
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
-/**
- * Phase 3 entity — Phase 5 adds the getSimilarity() transient helper
- * so AnswerGenerationService can read cosine similarity from native query results.
- *
- * IMPORTANT: Replace the existing DocumentChunk.java with this version.
- * The only additions vs Phase 3 are:
- *   - @Transient private Double distance field
- *   - getSimilarity() method
- *   - the @SqlResultSetMapping (if you prefer JPQL; otherwise use native query as before)
- */
 @Entity
 @Table(name = "document_chunk")
 @Getter @Setter @NoArgsConstructor @AllArgsConstructor @Builder
@@ -54,15 +44,6 @@ public class DocumentChunk {
     @Column(name = "created_at", nullable = false, updatable = false)
     private OffsetDateTime createdAt;
 
-    /**
-     * Phase 5 ADDITION — transient field populated by native vector-search queries.
-     *
-     * The pgvector <=> operator returns COSINE DISTANCE (0 = identical, 2 = opposite).
-     * We store it here so AnswerGenerationService can convert to similarity.
-     *
-     * This field is NOT a DB column — it is set programmatically after query execution
-     * when using the custom repository method that selects the distance alias.
-     */
     @Transient
     private Double distance;
 

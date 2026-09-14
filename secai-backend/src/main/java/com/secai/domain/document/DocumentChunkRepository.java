@@ -10,41 +10,6 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
-/**
- * DocumentChunkRepository — Phase 5 + Retrieval Fix.
- *
- * RETRIEVAL BUGS FIXED:
- *
- * BUG 1 — Hybrid search was effectively an INTERSECT, not UNION.
- *   The original WHERE clause was:
- *     WHERE org = :orgId
- *       AND (vector_distance < threshold OR fts_match)
- *   This looks like UNION but the vector_distance < threshold predicate silently
- *   EXCLUDED chunks that only matched via FTS (because pgvector still computed the
- *   distance and rows without an embedding or with distance ≥ threshold were dropped
- *   by the planner before the OR was evaluated on older pgvector builds).
- *   Fix: use a true UNION ALL of two separate subqueries, then deduplicate by id.
- *
- * BUG 2 — Vector threshold 0.35 is too tight for a small corpus.
- *   With only 6 chunks covering 23 topics, each chunk contains multiple topics.
- *   The semantic distance between "MFA" and a chunk discussing auth + passwords
- *   can be 0.38–0.45, just over the cutoff.
- *   Fix: raise VECTOR_THRESHOLD to 0.50 in AnswerGenerationService and this query.
- *   The hybrid reranking then keeps only the genuinely relevant results.
- *
- * BUG 3 — FTS keyword scoring was not normalized.
- *   ts_rank returns values in [0, 1] for short texts but can exceed 1.0 for
- *   long texts with many matches. Capping at 1.0 prevents FTS from dominating.
- *   Fix: use LEAST(ts_rank(...), 1.0) in the scoring formula.
- *
- * HYBRID SCORING FORMULA (unchanged but now correctly applied):
- *   combined_score = (semantic_similarity * 0.7) + (LEAST(fts_rank, 1.0) * 0.3)
- *   distance       = 1.0 - combined_score   (lower = better, reuses mapping logic)
- *
- * Column order in Object[] (same for findSimilarRaw and findHybridRaw):
- *   [0] id UUID  [1] org UUID  [2] doc UUID  [3] section_title  [4] text
- *   [5] chunk_index  [6] token_count  [7] created_at  [8] distance
- */
 public interface DocumentChunkRepository extends JpaRepository<DocumentChunk, UUID> {
 
     // ── Pure vector search (coverage analysis, document detail) ──────────────
@@ -252,7 +217,6 @@ public interface DocumentChunkRepository extends JpaRepository<DocumentChunk, UU
 
     long countByDocumentId(UUID documentId);
 
-//    Optional<DocumentChunk> findByIdAndOrganizationId(UUID id, UUID organizationId);
 
     @Query(value = """
     SELECT id, organization_id, document_id, section_title, text,

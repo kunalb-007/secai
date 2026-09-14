@@ -4,16 +4,13 @@ import com.secai.config.TenantContext;
 import com.secai.dto.coverage.CoverageReportResponse;
 import com.secai.service.CoverageAnalysisService;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RestController;
 
 import java.util.UUID;
 
-/**
- * Coverage Analysis endpoints.
- *
- *   GET  /api/questionnaires/{id}/coverage         — poll report status + results
- *   POST /api/questionnaires/{id}/coverage/refresh — re-run analysis (after new doc upload)
- */
 @RestController
 public class CoverageController {
 

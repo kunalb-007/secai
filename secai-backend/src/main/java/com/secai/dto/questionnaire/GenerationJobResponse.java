@@ -4,12 +4,6 @@ import com.secai.domain.questionnaire.AiGenerationJob.AiJobStatus;
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
-/**
- * DTO returned by GET /api/questionnaires/{id}/job and
- * POST /api/questionnaires/{id}/generate.
- *
- * Used by the frontend to poll generation progress and render the progress bar.
- */
 public record GenerationJobResponse(
         UUID            jobId,
         UUID            questionnaireId,

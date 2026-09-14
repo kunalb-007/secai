@@ -8,13 +8,6 @@ import org.springframework.web.bind.annotation.*;
 import java.util.Map;
 import java.util.UUID;
 
-/**
- * Approved Answer Library endpoints.
- *
- *   GET  /api/library/match?questionId={id}   — find a library match for a question
- *   POST /api/library/reuse                    — apply a library answer to a question
- *   GET  /api/library/stats                    — library size for the current org
- */
 @RestController
 @RequestMapping("/api/library")
 public class AnswerLibraryController {

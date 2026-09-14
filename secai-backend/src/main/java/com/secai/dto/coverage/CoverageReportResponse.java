@@ -3,12 +3,6 @@ package com.secai.dto.coverage;
 import java.util.List;
 import java.util.UUID;
 
-/**
- * Returned by GET /api/questionnaires/{id}/coverage
- *
- * Designed to drive the entire Coverage Analysis page without
- * any additional API calls.
- */
 public record CoverageReportResponse(
 
         UUID   questionnaireId,

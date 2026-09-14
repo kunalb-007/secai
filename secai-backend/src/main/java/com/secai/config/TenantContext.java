@@ -4,8 +4,6 @@ import java.util.UUID;
 
 /**
  * Holds the authenticated user's organizationId for the current request thread.
- * Set by JwtAuthFilter after token validation. Cleared after request completes.
- * Every repository query MUST filter by this value.
  */
 public class TenantContext {
 

@@ -5,10 +5,16 @@ import com.secai.domain.questionnaire.AiGenerationJob;
 import com.secai.domain.questionnaire.AiGenerationJobRepository;
 import com.secai.dto.questionnaire.*;
 import com.secai.exception.NotFoundException;
-import com.secai.service.*;
+import com.secai.service.AnswerGenerationService;
+import com.secai.service.ExportService;
+import com.secai.service.QuestionReviewService;
+import com.secai.service.QuestionnaireService;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.data.domain.Page;
-import org.springframework.http.*;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -18,13 +24,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
 
-/**
- * Phase 6 & 7 replacement for QuestionnaireController.
- *
- * New vs Phase 5:
- *   POST /api/questionnaires/{id}/questions/bulk-approve  ← Phase 6 bulk action
- *   GET  /api/questionnaires/{id}/export                  ← Phase 7 Excel export
- */
+
 @RestController
 public class QuestionnaireController {
 

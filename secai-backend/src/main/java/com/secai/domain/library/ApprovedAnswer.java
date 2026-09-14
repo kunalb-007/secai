@@ -33,10 +33,6 @@ public class ApprovedAnswer {
     @Column(name = "source_chunk_id")
     private UUID sourceChunkId;
 
-    // NEW — the document ID that provided the supporting evidence.
-// Stored when an answer is approved, surfaced via ApprovedAnswerMatch
-// so the frontend can render a clickable "Open source document" chip
-// even when the answer is reused from organizational memory.
     @Column(name = "source_document_id")
     private UUID sourceDocumentId;
 
