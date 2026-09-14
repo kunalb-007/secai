@@ -252,6 +252,33 @@ public interface DocumentChunkRepository extends JpaRepository<DocumentChunk, UU
 
     long countByDocumentId(UUID documentId);
 
-    Optional<DocumentChunk> findByIdAndOrganizationId(UUID id, UUID organizationId);
+//    Optional<DocumentChunk> findByIdAndOrganizationId(UUID id, UUID organizationId);
+
+    @Query(value = """
+    SELECT id, organization_id, document_id, section_title, text,
+           chunk_index, token_count, created_at
+    FROM document_chunk
+    WHERE id = :id AND organization_id = :orgId
+    LIMIT 1
+    """, nativeQuery = true)
+    List<Object[]> findByIdAndOrganizationIdRaw(
+            @Param("id")    UUID id,
+            @Param("orgId") UUID orgId
+    );
+
+    default Optional<DocumentChunk> findByIdAndOrganizationId(UUID id, UUID orgId) {
+        List<Object[]> rows = findByIdAndOrganizationIdRaw(id, orgId);
+        if (rows.isEmpty()) return Optional.empty();
+        Object[] row = rows.get(0);
+        DocumentChunk chunk = new DocumentChunk();
+        chunk.setId(row[0] != null ? UUID.fromString(row[0].toString()) : null);
+        chunk.setOrganizationId(row[1] != null ? UUID.fromString(row[1].toString()) : null);
+        chunk.setDocumentId(row[2] != null ? UUID.fromString(row[2].toString()) : null);
+        chunk.setSectionTitle(row[3] != null ? row[3].toString() : null);
+        chunk.setText(row[4] != null ? row[4].toString() : "");
+        chunk.setChunkIndex(row[5] != null ? ((Number) row[5]).intValue() : 0);
+        chunk.setTokenCount(row[6] != null ? ((Number) row[6]).intValue() : null);
+        return Optional.of(chunk);
+    }
 
 }

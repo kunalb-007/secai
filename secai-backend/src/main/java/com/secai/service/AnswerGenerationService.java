@@ -21,36 +21,15 @@ public class AnswerGenerationService {
 
     // ── Retrieval config ──────────────────────────────────────────────────────
 
-    // With small corpora (6–30 chunks covering many topics), a single chunk
-// covers multiple security domains. The cosine distance between a question
-// about "MFA" and a chunk covering auth + passwords + MFA is typically
-// 0.38–0.50 — comfortably over the old 0.35 cutoff.
-// The hybrid reranker (FTS branch + combined scoring) handles false positives.
-    private static final double VECTOR_THRESHOLD = 0.55;
-
-    /**
-     * RAISED from 5 → 7.
-     *
-     * Rationale: multi-part security questions often need evidence from
-     * different sections (e.g. "Do you have MFA and access reviews?" spans
-     * two sections). Top-5 was sometimes missing the second piece of evidence.
-     * Top-7 with 800-char context cap ≈ 1,400 tokens — within GPT-4o-mini limits.
-     */
-    private static final int TOP_K = 7;
-
-    // 300 tokens × ~4.5 chars/token = ~1350 chars.
-// Set to 1500 to never truncate a standard chunk while still bounding
-// runaway chunks from the paragraph-fallback path.
-    private static final int MAX_CONTEXT_CHARS = 1500;
-
-//    // ── Confidence penalties ──────────────────────────────────────────────────
-//    private static final double PENALTY_FEW_CHUNKS     = 0.7;
-//    private static final double PENALTY_SOME_CHUNKS    = 0.9;
-//    private static final double LOW_CONFIDENCE_CEILING = 0.15;
-
-    // Maximum confidence allowed when the LLM explicitly says there is
-// insufficient evidence in the uploaded documentation.
+    private static final double VECTOR_THRESHOLD    = 0.55;
+    private static final int    TOP_K               = 7;
+    private static final int    MAX_CONTEXT_CHARS   = 1500;
     private static final double LOW_CONFIDENCE_CEILING = 0.45;
+
+    // Two chunks are considered textually duplicate if their first N chars match.
+    // 200 chars covers one or two sentences — enough to detect overlapping chunks
+    // whose sectionTitles differ slightly (e.g. null vs "A&A-01").
+    private static final int DUPLICATE_TEXT_PREFIX_LEN = 200;
 
     private final QuestionRepository          questionRepo;
     private final AiGenerationJobRepository   jobRepo;
@@ -124,69 +103,63 @@ public class AnswerGenerationService {
 
     public void generateAnswer(Question question, UUID orgId) {
 
-        // ── Step 1: Build normalised query ────────────────────────────────────
-        // Expand synonyms BEFORE embedding so the vector is semantically broader.
-        // E.g. "Is MFA enforced?" → "Is MFA enforced? multi-factor authentication
-        //      required enabled mandatory" — the extra terms pull the embedding
-        // centroid toward the dense auth/access-control region of the vector space.
+        // ── Step 1: Normalise query ───────────────────────────────────────────
         String normalizedQuestion = normalizeQuery(question.getQuestionText());
 
-        // ── Step 2: Embed the normalised question ─────────────────────────────
+        // ── Step 2: Embed ─────────────────────────────────────────────────────
         float[] embedding    = embeddingService.embed(normalizedQuestion);
         String  embeddingStr = embeddingService.toVectorString(embedding);
 
-        // ── Step 3: Build FTS keyword string ─────────────────────────────────
-        // Extract the core keywords for plainto_tsquery.
-        // We use the ORIGINAL question (not the expanded one) for FTS because
-        // the extra synonym terms would generate too many false FTS matches.
+        // ── Step 3: FTS keywords ──────────────────────────────────────────────
         String keywords = extractKeywords(question.getQuestionText());
 
-        // ── Step 4: Hybrid search ─────────────────────────────────────────────
-        List<DocumentChunk> chunks = chunkRepo.findHybrid(
+        // ── Step 4: Hybrid search — raw results ──────────────────────────────
+        List<DocumentChunk> rawChunks = chunkRepo.findHybrid(
                 orgId, embeddingStr, keywords, VECTOR_THRESHOLD, TOP_K
         );
 
-        log.info("[question:{}] Hybrid search returned {} chunks (keywords: '{}')",
-                question.getId(), chunks.size(), keywords);
+        // ── Step 5: Deduplicate for context only ──────────────────────────────
+        // rawChunks is kept intact for confidence scoring (see computeConfidence).
+        // deduplicatedChunks is used only for building the LLM prompt, so the LLM
+        // never sees the same section twice and doesn't repeat it in Evidence.
+        List<DocumentChunk> deduplicatedChunks = deduplicateChunks(rawChunks);
 
-        for (int i = 0; i < chunks.size(); i++) {
-            DocumentChunk c = chunks.get(i);
+        log.info("[question:{}] Hybrid search: {} raw → {} deduplicated (keywords: '{}')",
+                question.getId(), rawChunks.size(), deduplicatedChunks.size(), keywords);
 
-            log.info("""
-        Rank {}
-        Doc={}
-        Section={}
-        Similarity={}
-        Text={}
-        """,
-                    i + 1,
-                    c.getDocumentId(),
-                    c.getSectionTitle(),
-                    c.getSimilarity(),
-                    c.getText().substring(0, Math.min(120, c.getText().length()))
-            );
+        // ── Step 6: Filter chunks for LLM context (same logic as buildContext) ──
+        List<DocumentChunk> contextChunks = deduplicatedChunks.stream()
+                .filter(c -> c.getSimilarity() >= 0.45)
+                .collect(Collectors.toList());
+        if (contextChunks.isEmpty() && !deduplicatedChunks.isEmpty()) {
+            contextChunks = deduplicatedChunks.subList(0, 1);
+        }
+        if (contextChunks.size() > 3) {
+            contextChunks = contextChunks.subList(0, 3);
         }
 
-        // ── Step 5: Build context ─────────────────────────────────────────────
-        String context = buildContext(chunks);
+        // ── Step 7: Build context from filtered chunks only ────────────────────
+        String context = buildContext(contextChunks);
 
-        // ── Step 6: LLM call ─────────────────────────────────────────────────
-        // Use the ORIGINAL question in the prompt — the LLM needs the real question,
-        // not the synonym-expanded version.
+        // ── Step 8: LLM call ──────────────────────────────────────────────────
         String llmResponse = llmService.complete(
                 buildSystemPrompt(),
                 buildUserMessage(context, question.getQuestionText())
         );
 
-        // ── Step 7: Parse response ────────────────────────────────────────────
-        String answer     = extractAnswer(llmResponse);
-        String evidence   = extractEvidence(llmResponse);
-        double confidence = computeConfidence(chunks, answer);
+        // ── Step 9: Parse response ────────────────────────────────────────────
+        String answer   = extractAnswer(llmResponse);
+        // Pass contextChunks (not deduplicatedChunks) so evidence dedup only
+        // considers the sections the LLM actually saw
+        String evidence = extractEvidence(llmResponse, contextChunks);
+        // Pass rawChunks so corroboration bonus uses all matching chunks
+        double confidence = computeConfidence(rawChunks, answer);
 
-        UUID sourceChunkId    = chunks.isEmpty() ? null : chunks.get(0).getId();
-        UUID sourceDocumentId = chunks.isEmpty() ? null : chunks.get(0).getDocumentId();
+        // sourceChunkId comes from the top context chunk (highest scoring filtered chunk)
+        UUID sourceChunkId    = contextChunks.isEmpty() ? null : contextChunks.get(0).getId();
+        UUID sourceDocumentId = contextChunks.isEmpty() ? null : contextChunks.get(0).getDocumentId();
 
-        // ── Step 8: Save in a short-lived transaction ─────────────────────────
+        // ── Step 10: Save ─────────────────────────────────────────────────────
         final String finalAnswer      = answer.trim();
         final String finalEvidence    = evidence.trim();
         final double finalConfidence  = confidence;
@@ -205,11 +178,13 @@ public class AnswerGenerationService {
             return questionRepo.save(q);
         });
 
-        log.info("[question:{}] Saved. confidence={} sourceChunk={} chunks={}",
+        log.info("[question:{}] Saved. confidence={} topRawSimilarity={} rawChunks={} dedupChunks={} contextChunks={}",
                 question.getId(),
                 String.format("%.2f", confidence),
-                String.format("%.2f", chunks.isEmpty() ? 0.0 : chunks.get(0).getSimilarity()),
-                chunks.size());
+                String.format("%.2f", rawChunks.isEmpty() ? 0.0 : rawChunks.get(0).getSimilarity()),
+                rawChunks.size(),
+                deduplicatedChunks.size(),
+                contextChunks.size());
     }
 
     @Transactional
@@ -223,34 +198,75 @@ public class AnswerGenerationService {
         questionRepo.save(question);
     }
 
-    // ── Query normalisation ───────────────────────────────────────────────────
+    // ── Chunk deduplication (for context only) ────────────────────────────────
 
     /**
-     * Expands security questionnaire questions with synonyms before embedding.
+     * Removes duplicate chunks before building the LLM prompt.
      *
-     * WHY THIS IS NEEDED:
-     * Security questionnaires use highly variable phrasing for identical concepts.
-     * "Is MFA enforced?" and "Do you require multi-factor authentication?" are
-     * semantically identical but their embeddings can be 0.30–0.45 cosine distance
-     * apart — enough to miss retrieval at a 0.35 threshold.
+     * Two passes of deduplication:
      *
-     * HOW IT WORKS:
-     * We append a synonym expansion string after the original question.
-     * The embedding model averages across the full input, pulling the vector
-     * toward the centroid of all the synonym meanings.
-     * The LLM receives only the ORIGINAL question (see buildUserMessage).
+     * Pass 1 — by (documentId, sectionTitle):
+     *   The chunker's 50-token overlap means chunks 51, 52, 53 from section "A&A-01"
+     *   all score well and all enter the prompt as [A&A-01], [A&A-01], [A&A-01].
+     *   The LLM then writes "Evidence: A&A-01, A&A-01, A&A-01".
+     *   Keep only the highest-scoring chunk per (documentId, sectionTitle).
      *
-     * SYNONYM GROUPS (tuned for common security questionnaire patterns):
-     * Each group maps one "question word" to the set of equivalent terms
-     * used in security documentation (policies, SOC 2 reports, etc.).
+     * Pass 2 — by text prefix:
+     *   Catches chunks whose sectionTitle differs slightly (e.g. null vs "A&A-01",
+     *   or "A&A-01" vs "A&A-01 Authentication") but whose actual text content is
+     *   almost identical (overlapping text windows). If the first 200 chars match,
+     *   the chunks are textually the same — keep the higher scorer.
+     *
+     * IMPORTANT: this list is used ONLY for building the context string and for
+     * extractEvidence(). computeConfidence() still receives rawChunks so that the
+     * corroboration bonus (multiple chunks supporting the same answer) is preserved.
      */
+    private List<DocumentChunk> deduplicateChunks(List<DocumentChunk> chunks) {
+        if (chunks.size() <= 1) return chunks;
+
+        // Pass 1: deduplicate by (documentId + sectionTitle)
+        Map<String, DocumentChunk> bySectionKey = new LinkedHashMap<>();
+        for (DocumentChunk chunk : chunks) {
+            String key = chunk.getDocumentId()
+                    + ":"
+                    + (chunk.getSectionTitle() != null ? chunk.getSectionTitle() : "");
+            bySectionKey.merge(key, chunk, (existing, candidate) ->
+                    candidate.getSimilarity() > existing.getSimilarity() ? candidate : existing
+            );
+        }
+
+        // Re-sort after merge (merge can disorder by similarity)
+        List<DocumentChunk> pass1 = bySectionKey.values().stream()
+                .sorted(Comparator.comparingDouble(DocumentChunk::getSimilarity).reversed())
+                .collect(Collectors.toList());
+
+        if (pass1.size() <= 1) return pass1;
+
+        // Pass 2: deduplicate by text prefix (catches different-title but same-content chunks)
+        List<DocumentChunk> result = new ArrayList<>();
+        Set<String> seenPrefixes  = new LinkedHashSet<>();
+
+        for (DocumentChunk chunk : pass1) {
+            String text   = chunk.getText() != null ? chunk.getText() : "";
+            String prefix = text.length() > DUPLICATE_TEXT_PREFIX_LEN
+                    ? text.substring(0, DUPLICATE_TEXT_PREFIX_LEN).strip()
+                    : text.strip();
+            if (seenPrefixes.add(prefix)) {
+                result.add(chunk);
+            }
+        }
+
+        return result;
+    }
+
+    // ── Query normalisation ───────────────────────────────────────────────────
+
     private String normalizeQuery(String questionText) {
         if (questionText == null || questionText.isBlank()) return questionText;
 
         String lower = questionText.toLowerCase();
         List<String> expansions = new ArrayList<>();
 
-        // ── Authentication / Access control ───────────────────────────────────
         if (matches(lower, "mfa", "multi-factor", "two-factor", "2fa", "2-factor")) {
             expansions.add("multi-factor authentication MFA two-factor authentication 2FA required mandatory enabled");
         }
@@ -269,8 +285,6 @@ public class AnswerGenerationService {
         if (matches(lower, "rbac", "role-based", "least privilege", "need to know")) {
             expansions.add("role-based access control RBAC least privilege need-to-know permissions");
         }
-
-        // ── Encryption ────────────────────────────────────────────────────────
         if (matches(lower, "encrypt", "encryption", "cipher", "aes", "tls", "ssl")) {
             expansions.add("encryption AES-256 TLS 1.2 TLS 1.3 SSL cipher data protection in transit at rest");
         }
@@ -283,8 +297,6 @@ public class AnswerGenerationService {
         if (matches(lower, "data at rest", "disk encryption", "storage encryption", "database encryption")) {
             expansions.add("data at rest encryption disk AES-256 encrypted database storage volumes");
         }
-
-        // ── Logging / Monitoring ──────────────────────────────────────────────
         if (matches(lower, "log", "logging", "audit trail", "audit log", "event log")) {
             expansions.add("logging audit trail log retention SIEM event monitoring centralized");
         }
@@ -297,8 +309,6 @@ public class AnswerGenerationService {
         if (matches(lower, "siem", "security information", "event management", "splunk", "elk")) {
             expansions.add("SIEM security information event management log aggregation Splunk ELK monitoring");
         }
-
-        // ── Vulnerability / Penetration testing ───────────────────────────────
         if (matches(lower, "penetration test", "pentest", "pen test", "red team")) {
             expansions.add("penetration testing pentest annual third-party red team vulnerability assessment scope");
         }
@@ -308,8 +318,6 @@ public class AnswerGenerationService {
         if (matches(lower, "sast", "dast", "static analysis", "dynamic analysis", "code scan")) {
             expansions.add("SAST DAST static dynamic code analysis security scanning pipeline CI/CD");
         }
-
-        // ── Backup / Recovery ─────────────────────────────────────────────────
         if (matches(lower, "backup", "back up", "restore", "recovery")) {
             expansions.add("backup recovery restore encrypted offsite retention tested RTO RPO");
         }
@@ -319,50 +327,36 @@ public class AnswerGenerationService {
         if (matches(lower, "disaster recovery", "business continuity", "bcp", "drp")) {
             expansions.add("disaster recovery business continuity plan BCP DRP failover resilience");
         }
-
-        // ── Infrastructure / Cloud ────────────────────────────────────────────
         if (matches(lower, "cloud provider", "cloud hosting", "aws", "azure", "gcp", "google cloud")) {
             expansions.add("cloud provider AWS Azure GCP Amazon Web Services hosting infrastructure region");
         }
         if (matches(lower, "secret", "api key", "credentials", "vault", "secret management")) {
             expansions.add("secret management API key credentials vault HashiCorp rotation environment variable");
         }
-
-        // ── SDLC / Development ────────────────────────────────────────────────
         if (matches(lower, "pull request", "code review", "peer review", "merge", "branch")) {
             expansions.add("pull request code review peer review merge branch approval SDLC");
         }
-
-        // ── Physical security ─────────────────────────────────────────────────
         if (matches(lower, "visitor", "physical access", "data center", "badge", "cctv")) {
             expansions.add("visitor registration physical access data center badge CCTV camera log escort");
         }
-
-        // ── Compliance / Risk ─────────────────────────────────────────────────
         if (matches(lower, "compliance", "framework", "iso 27001", "soc 2", "nist", "gdpr", "hipaa", "pci")) {
             expansions.add("compliance framework ISO 27001 SOC 2 NIST GDPR HIPAA PCI-DSS certification audit");
         }
         if (matches(lower, "risk assessment", "risk management", "risk register")) {
             expansions.add("risk assessment risk management risk register annual threat model impact likelihood");
         }
-
-        // ── Training / HR ─────────────────────────────────────────────────────
         if (matches(lower, "security training", "security awareness", "phishing", "annual training")) {
             expansions.add("security awareness training annual phishing simulation onboarding policy acknowledgement");
         }
         if (matches(lower, "vendor", "third party", "supplier", "sub-processor", "fourth party")) {
             expansions.add("vendor third-party supplier risk assessment annual review contract DPA sub-processor");
         }
-
-        // ── Time period synonyms (catches "annually" vs "yearly" etc.) ────────
         if (matches(lower, "annual", "annually", "yearly", "once a year", "per year")) {
             expansions.add("annual annually yearly once a year periodic frequency");
         }
         if (matches(lower, "quarter", "quarterly", "every 3 months", "periodically")) {
             expansions.add("quarterly periodically regular schedule frequency review");
         }
-
-        // ── Boolean / enforcement synonyms ────────────────────────────────────
         if (matches(lower, "enforced", "required", "mandatory", "must", "compulsory")) {
             expansions.add("enforced required mandatory enabled configured policy required");
         }
@@ -370,18 +364,10 @@ public class AnswerGenerationService {
             expansions.add("enabled active implemented deployed configured in place enforced");
         }
 
-        if (expansions.isEmpty()) {
-            return questionText; // no expansion needed
-        }
-
-        // Append expansions as a separate line so the embedding model
-        // treats them as supplementary context, not part of the question.
+        if (expansions.isEmpty()) return questionText;
         return questionText + "\n" + String.join(" ", expansions);
     }
 
-    /**
-     * Returns true if the text contains ANY of the given terms (case-insensitive).
-     */
     private boolean matches(String lowerText, String... terms) {
         for (String term : terms) {
             if (lowerText.contains(term.toLowerCase())) return true;
@@ -391,24 +377,12 @@ public class AnswerGenerationService {
 
     // ── Keyword extraction for FTS ────────────────────────────────────────────
 
-    /**
-     * Extracts keywords from the ORIGINAL (non-expanded) question for FTS.
-     *
-     * plainto_tsquery handles stop words, stemming, and tokenization automatically.
-     * We just need to pass a clean string. The full question works well.
-     * Cap at 200 chars to avoid passing absurdly long strings to the FTS parser.
-     */
     private String extractKeywords(String questionText) {
         if (questionText == null || questionText.isBlank()) return "security";
-
-        // Keep alphanumeric, spaces, hyphens, dots, slashes, and colons.
-        // Slashes and colons appear in security terms: "AES-256/GCM", "TLS 1.3", "SHA-256".
-        // The downstream sanitizer in findHybrid() removes anything that breaks plainto_tsquery.
         String cleaned = questionText
                 .replaceAll("[^a-zA-Z0-9\\s\\-./:]", " ")
                 .replaceAll("\\s{2,}", " ")
                 .trim();
-
         return cleaned.length() > 250 ? cleaned.substring(0, 250) : cleaned;
     }
 
@@ -419,25 +393,43 @@ public class AnswerGenerationService {
         return text.length() <= MAX_CONTEXT_CHARS ? text : text.substring(0, MAX_CONTEXT_CHARS);
     }
 
-    // AFTER
+    /**
+     * Builds the LLM context string from deduplicated chunks.
+     *
+     * Labels each chunk with only its section title (not "[Source N | title]").
+     * The "[Source N | ...]" format was leaking into the LLM's Evidence: line,
+     * producing stored strings like "[Source 1 | A&A-01], [Source 4 | GRC-03]"
+     * instead of clean "A&A-01, GRC-03".
+     */
     private String buildContext(List<DocumentChunk> chunks) {
         if (chunks.isEmpty()) return "No relevant documentation found.";
-        // Include rank so the LLM can weight the most relevant chunk higher.
-        // Only include chunks above a minimum combined_score to avoid injecting
-        // noise from the bottom of the TOP_K list when the corpus is small.
+
+        // Step 1: filter to chunks that are genuinely relevant (similarity >= 0.45).
+        // With a small corpus, many chunks score 0.15–0.44 via FTS keyword overlap
+        // even when they don't actually answer the question.
+        // 0.45 corresponds to a combined hybrid score where the chunk is meaningfully related.
         List<DocumentChunk> usable = chunks.stream()
-                .filter(c -> c.getSimilarity() >= 0.15)
+                .filter(c -> c.getSimilarity() >= 0.45)
                 .toList();
-        if (usable.isEmpty()) usable = chunks.subList(0, 1); // always keep at least one
+
+        // Step 2: if strict filter leaves nothing, fall back to top-1 only
+        // (better to give the LLM one weak chunk than 6 unrelated ones)
+        if (usable.isEmpty()) {
+            usable = chunks.subList(0, 1);
+        }
+
+        // Step 3: hard cap at 3 — LLM should never see more than 3 sections.
+        // With qwen2.5:7b, passing >3 sections causes it to cite all of them.
+        if (usable.size() > 3) {
+            usable = usable.subList(0, 3);
+        }
 
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < usable.size(); i++) {
             DocumentChunk c = usable.get(i);
             if (i > 0) sb.append("\n\n---\n\n");
-            sb.append(String.format("[Source %d | %s]\n%s",
-                    i + 1,
-                    c.getSectionTitle() != null ? c.getSectionTitle() : "Document",
-                    trimChunk(c.getText())));
+            String label = c.getSectionTitle() != null ? c.getSectionTitle() : "Document";
+            sb.append(String.format("[%s]\n%s", label, trimChunk(c.getText())));
         }
         return sb.toString();
     }
@@ -474,7 +466,11 @@ Rules:
    Evidence: N/A
 2. Never write "the context states", "according to the document", or similar phrases.
 3. Be direct and factual. Use compliance language. Maximum 2 sentences.
-4. Always use this exact format — no other text before or after.
+4. For Evidence: write ONLY the single section name from [ ] that most directly answers the question.
+   Never list more than one section. Never repeat a section name.
+5. Always use this exact format with no other text before or after:
+   Answer: <your answer>
+   Evidence: <single section name>
 """;
     }
 
@@ -495,66 +491,145 @@ Rules:
         return n.substring(start).strip();
     }
 
-    private String extractEvidence(String response) {
+    /**
+     * Extracts and cleans the evidence string from the LLM response.
+     *
+     * Three-step cleaning process:
+     *
+     * Step 1 — parse the "Evidence:" line from the LLM response.
+     *
+     * Step 2 — strip any "[Source N | ...]" markers the LLM may still produce
+     *   (defensive; shouldn't happen with the new context format but handles
+     *    edge cases where the LLM deviates from the prompt).
+     *
+     * Step 3 — deduplicate section names.
+     *   Split the evidence string on comma/semicolon, match each token against
+     *   the section titles of the chunks that were actually provided to the LLM,
+     *   and deduplicate by canonical title. This catches:
+     *     - LLM writing "A&A-01, A&A-01" (same name twice)
+     *     - LLM writing "A&A-01, A&A-01 Authentication" (same section, different label)
+     *
+     * Falls back gracefully: if nothing matches the known titles, use the raw
+     * LLM text (minus bracket formatting) so we never silently drop evidence.
+     *
+     * @param response  raw LLM completion string
+     * @param chunks    deduplicated chunks that were passed to the LLM
+     */
+    private String extractEvidence(String response, List<DocumentChunk> chunks) {
         if (response == null || response.isBlank()) return "N/A";
         String n = response.replace("\r\n", "\n").replace("\r", "\n");
+
+        // Step 1: parse "Evidence:" line
         int idx = n.toLowerCase().indexOf("evidence:");
         if (idx == -1) return "N/A";
-        String e = n.substring(idx + "evidence:".length()).strip();
-        int nl = e.indexOf('\n');
-        if (nl > 0) e = e.substring(0, nl).strip();
-        return e.isBlank() ? "N/A" : e;
+        String raw = n.substring(idx + "evidence:".length()).strip();
+        int nl = raw.indexOf('\n');
+        if (nl > 0) raw = raw.substring(0, nl).strip();
+        if (raw.isBlank() || raw.equalsIgnoreCase("N/A")) return "N/A";
+
+        // Step 2: strip "[Source N | ...]" markers (defensive)
+        raw = raw.replaceAll("\\[Source\\s+\\d+\\s*\\|\\s*", "[")
+                .replaceAll("\\[([^\\]]+)\\]", "$1")
+                .trim();
+
+        // Step 3: Build ordered set of canonical section titles from chunks
+        // Preserve insertion order (chunks are sorted by relevance descending)
+        List<String> knownTitles = chunks.stream()
+                .map(c -> c.getSectionTitle() != null ? c.getSectionTitle().trim() : "")
+                .filter(t -> !t.isEmpty())
+                .distinct()
+                .collect(Collectors.toList());
+
+        // Step 4: Parse LLM evidence tokens and map each to exactly one canonical title
+        String[] tokens = raw.split("[,;]");
+        List<String> out = new ArrayList<>();
+        // Track by lowercase to catch case variations
+        Set<String> seenLower = new LinkedHashSet<>();
+
+        for (String token : tokens) {
+            String t = token.trim();
+            if (t.isEmpty()) continue;
+
+            // Priority 1: exact case-insensitive match against known titles
+            String canonical = null;
+            for (String title : knownTitles) {
+                if (title.equalsIgnoreCase(t)) {
+                    canonical = title;
+                    break;
+                }
+            }
+
+            // Priority 2: token is a prefix/substring of a known title (e.g. "A&A-01" matches "A&A-01 Authentication")
+            // Only if no exact match found
+            if (canonical == null) {
+                for (String title : knownTitles) {
+                    if (title.toLowerCase().startsWith(t.toLowerCase())) {
+                        canonical = title;
+                        break;
+                    }
+                }
+            }
+
+            // Priority 3: known title is contained within the token
+            if (canonical == null) {
+                for (String title : knownTitles) {
+                    if (t.toLowerCase().contains(title.toLowerCase())) {
+                        canonical = title;
+                        break;
+                    }
+                }
+            }
+
+            // Fallback: use the raw token as-is (don't silently drop unknown evidence)
+            if (canonical == null) {
+                canonical = t;
+            }
+
+            // Only add if this canonical title hasn't appeared yet
+            if (seenLower.add(canonical.toLowerCase())) {
+                out.add(canonical);
+            }
+            // If already seen: skip — this is the duplicate suppression
+        }
+
+        return out.isEmpty() ? raw : String.join(", ", out);
     }
 
     // ── Confidence scoring ────────────────────────────────────────────────────
 
-    // AFTER
-    private double computeConfidence(List<DocumentChunk> chunks, String answer) {
+    /**
+     * Computes confidence from rawChunks (NOT deduplicated).
+     *
+     * WHY rawChunks:
+     * The corroboration bonus rewards multiple independent chunks all supporting
+     * the same answer. This is a genuine quality signal — if chunks 51, 52, 53
+     * from section A&A-01 all match the question, the document clearly covers
+     * that topic thoroughly. Deduplicating before scoring would remove this signal
+     * and drop scores by 8-20% on well-covered questions.
+     *
+     * rawChunks are the direct output of findHybrid(), sorted by combined score.
+     */
+    private double computeConfidence(List<DocumentChunk> rawChunks, String answer) {
+        if (rawChunks.isEmpty()) return 0.05;
 
-        // No supporting evidence retrieved at all.
-        if (chunks.isEmpty()) {
-            return 0.05;
-        }
-
-        // --- Base score from top-chunk retrieval ---
-        // combined_score = semantic(0.7) + FTS(0.3), range [0, 1].
-        // FTS-only chunks land around 0.15–0.30 even when they contain the exact answer,
-        // so we use relaxed tiers that treat anything above 0.20 as potentially useful.
-        double topScore = chunks.get(0).getSimilarity();
+        double topScore = rawChunks.get(0).getSimilarity();
 
         double baseConfidence;
-        if (topScore >= 0.70) {
-            baseConfidence = 0.92;
-        } else if (topScore >= 0.55) {
-            baseConfidence = 0.82;
-        } else if (topScore >= 0.38) {
-            baseConfidence = 0.70;
-        } else if (topScore >= 0.22) {
-            baseConfidence = 0.58;
-        } else if (topScore >= 0.10) {
-            baseConfidence = 0.42;
-        } else {
-            baseConfidence = 0.25;
-        }
+        if      (topScore >= 0.70) baseConfidence = 0.92;
+        else if (topScore >= 0.55) baseConfidence = 0.82;
+        else if (topScore >= 0.38) baseConfidence = 0.70;
+        else if (topScore >= 0.22) baseConfidence = 0.58;
+        else if (topScore >= 0.10) baseConfidence = 0.42;
+        else                       baseConfidence = 0.25;
 
-        // --- Corroboration bonus: multiple chunks agreeing raises confidence ---
-        // Each additional chunk above a minimum threshold adds a small bonus,
-        // capped so that 3+ supporting chunks can lift a borderline score to "high".
-        long corroboratingChunks = chunks.stream()
-                .skip(1) // skip top chunk already accounted for
+        long corroboratingChunks = rawChunks.stream()
+                .skip(1)
                 .filter(c -> c.getSimilarity() >= 0.18)
                 .count();
         double corroborationBonus = Math.min(corroboratingChunks * 0.05, 0.15);
 
         double confidence = baseConfidence + corroborationBonus;
 
-        // AFTER
-// Only penalise when the LLM's answer is purely negative — i.e. the
-// entire answer signals missing evidence. Partial answers that begin
-// with a hedge but contain substantive content should not be capped.
-// Strategy: check for the exact sentinel the system prompt mandates
-// ("Insufficient evidence in current documentation") and a small set
-// of unambiguous no-evidence phrases.
         if (answer != null) {
             String lower = answer.toLowerCase().trim();
             boolean purelyNegative =

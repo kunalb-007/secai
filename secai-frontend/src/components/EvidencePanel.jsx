@@ -1,5 +1,3 @@
-// REPLACE ENTIRE FILE: src/components/EvidencePanel.jsx
-
 import { useState } from 'react';
 import { Tag, Tooltip, Typography } from 'antd';
 import {

@@ -1,5 +1,3 @@
-// NEW FILE: src/components/EvidenceDetailsModal.jsx
-
 import { useEffect, useState } from 'react';
 import { Modal, Button, Typography, Spin, Alert, Space, Tag, Divider } from 'antd';
 import {

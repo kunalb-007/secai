@@ -7,10 +7,15 @@ import java.util.List;
  */
 public record ParseResult(
         List<ParsedQuestion> questions,
-        double               confidence,     // 0.0–1.0: fraction of rows matched as questions
-        boolean              lowConfidence,  // true when confidence < 0.5
-        String               warningMessage  // nullable; shown to user when lowConfidence
+        double               confidence,
+        boolean              lowConfidence,
+        String               warningMessage,
+        ParseDiagnostics     diagnostics        // nullable — CSV/DOCX parsers pass null
 ) {
+    /**
+     * Convenience factory for parsers without full diagnostics (CSV, DOCX).
+     * Passes null for diagnostics so those parsers need zero changes.
+     */
     public static ParseResult of(List<ParsedQuestion> questions, int totalRowsAttempted) {
         double confidence = totalRowsAttempted == 0
                 ? 0.0
@@ -22,6 +27,6 @@ public record ParseResult(
                 + "Please review and add any missing questions.",
                 questions.size(), totalRowsAttempted, confidence * 100)
                 : null;
-        return new ParseResult(questions, confidence, low, warning);
+        return new ParseResult(questions, confidence, low, warning, null);
     }
 }
