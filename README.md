@@ -6,7 +6,7 @@ The system retrieves relevant evidence from uploaded security documents, generat
 
 ## Architecture
 
-![AI Security Questionnaire Automation Platform](docs/architecture.png)
+![AI Security Questionnaire Automation Platform](secai-backend/docs/architecture.png)
 
 ## Key Capabilities
 
